@@ -66,5 +66,28 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
     path
   }
   console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+  return errInfo;
+}
+
+import { onSnapshot as firebaseOnSnapshot, Query, DocumentReference, DocumentSnapshot, QuerySnapshot, FirestoreError } from "firebase/firestore";
+
+export function safeSnapshot<T>(
+  ref: Query<T> | DocumentReference<T>,
+  onNext: (snapshot: QuerySnapshot<T> | DocumentSnapshot<T>) => void,
+  onError?: (error: FirestoreError) => void,
+  operationType: OperationType = OperationType.GET,
+  path: string | null = null
+) {
+  return firebaseOnSnapshot(
+    ref as any,
+    (snapshot: any) => {
+      onNext(snapshot);
+    },
+    (error: FirestoreError) => {
+      handleFirestoreError(error, operationType, path);
+      if (onError) {
+        onError(error);
+      }
+    }
+  );
 }

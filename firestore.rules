@@ -105,15 +105,22 @@ service cloud.firestore {
     
     // Вспомогательная функция для проверки доступа к проекту
     function isProjectParticipant(projectId) {
-      let project = get(/databases/$(database)/documents/projects/$(projectId)).data;
-      return isAdmin() || isRoleAdmin() || 
-             request.auth.uid == project.owner_uid || 
-             request.auth.uid in project.participant_uids;
+      return isAdmin() || isRoleAdmin() || (
+        exists(/databases/$(database)/documents/projects/$(projectId)) && (
+          request.auth.uid == get(/databases/$(database)/documents/projects/$(projectId)).data.owner_uid || 
+          (
+            "participant_uids" in get(/databases/$(database)/documents/projects/$(projectId)).data &&
+            request.auth.uid in get(/databases/$(database)/documents/projects/$(projectId)).data.participant_uids
+          )
+        )
+      );
     }
 
     function isProjectOwner(projectId) {
-      let project = get(/databases/$(database)/documents/projects/$(projectId)).data;
-      return isAdmin() || isRoleAdmin() || request.auth.uid == project.owner_uid;
+      return isAdmin() || isRoleAdmin() || (
+        exists(/databases/$(database)/documents/projects/$(projectId)) && 
+        request.auth.uid == get(/databases/$(database)/documents/projects/$(projectId)).data.owner_uid
+      );
     }
 
     function getParticipantRole(projectId, uid) {

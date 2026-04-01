@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { db, handleFirestoreError, OperationType } from "../firebase";
-import { collection, query, where, onSnapshot, limit, orderBy, Timestamp, addDoc, serverTimestamp, getDocs } from "firebase/firestore";
+import { db, handleFirestoreError, OperationType, safeSnapshot } from "../firebase";
+import { collection, query, where, limit, orderBy, Timestamp, addDoc, serverTimestamp, getDocs, doc, setDoc } from "firebase/firestore";
 import { useAuth } from "../components/FirebaseProvider";
 import { Project, UserProfile } from "../types";
 import { 
@@ -93,29 +93,34 @@ export function Dashboard() {
       limit(5)
     );
 
-    unsub1 = onSnapshot(ownerQuery, (snapshot) => {
-      ownerDocs = processDocs(snapshot.docs);
-      updateState();
-    }, (err) => {
-      console.error("Dashboard owner projects error:", err);
-      if (err.code === 'permission-denied') {
-        toast.error("Доступ к некоторым проектам ограничен");
-      } else {
-        handleFirestoreError(err, OperationType.GET, "projects");
-      }
-    });
+    unsub1 = safeSnapshot(
+      ownerQuery,
+      (snapshot: any) => {
+        ownerDocs = processDocs(snapshot.docs);
+        updateState();
+      },
+      (err) => {
+        console.error("Dashboard owner projects error:", err);
+        if (err.code === 'permission-denied') {
+          toast.error("Доступ к некоторым проектам ограничен");
+        }
+      },
+      OperationType.GET,
+      "projects"
+    );
 
-    unsub2 = onSnapshot(participantQuery, (snapshot) => {
-      participantDocs = processDocs(snapshot.docs);
-      updateState();
-    }, (err) => {
-      console.error("Dashboard participant projects error:", err);
-      if (err.code === 'permission-denied') {
-        // Silent or toast
-      } else {
-        handleFirestoreError(err, OperationType.GET, "projects");
-      }
-    });
+    unsub2 = safeSnapshot(
+      participantQuery,
+      (snapshot: any) => {
+        participantDocs = processDocs(snapshot.docs);
+        updateState();
+      },
+      (err) => {
+        console.error("Dashboard participant projects error:", err);
+      },
+      OperationType.GET,
+      "projects"
+    );
 
     // Fetch friends count - separate listeners to avoid nesting
     const friendsQuery = query(
@@ -129,23 +134,29 @@ export function Dashboard() {
       where("participant2", "==", user.uid)
     );
 
-    const unsubscribeFriends1 = onSnapshot(friendsQuery, (s1) => {
-      setStats(prev => ({ ...prev, totalFriends1: s1.size }));
-    }, (err) => {
-      console.error("Dashboard friends 1 error:", err);
-      if (err.code !== 'permission-denied') {
-        handleFirestoreError(err, OperationType.GET, "friends");
-      }
-    });
+    const unsubscribeFriends1 = safeSnapshot(
+      friendsQuery,
+      (s1: any) => {
+        setStats(prev => ({ ...prev, totalFriends1: s1.size }));
+      },
+      (err) => {
+        console.error("Dashboard friends 1 error:", err);
+      },
+      OperationType.GET,
+      "friends"
+    );
 
-    const unsubscribeFriends2 = onSnapshot(friendsQuery2, (s2) => {
-      setStats(prev => ({ ...prev, totalFriends2: s2.size }));
-    }, (err) => {
-      console.error("Dashboard friends 2 error:", err);
-      if (err.code !== 'permission-denied') {
-        handleFirestoreError(err, OperationType.GET, "friends");
-      }
-    });
+    const unsubscribeFriends2 = safeSnapshot(
+      friendsQuery2,
+      (s2: any) => {
+        setStats(prev => ({ ...prev, totalFriends2: s2.size }));
+      },
+      (err) => {
+        console.error("Dashboard friends 2 error:", err);
+      },
+      OperationType.GET,
+      "friends"
+    );
 
     return () => {
       unsub1();
@@ -222,7 +233,7 @@ export function Dashboard() {
               if (!newProject.title.trim() || !user) return;
               setLoading(true);
               try {
-                await addDoc(collection(db, "projects"), {
+                const projectRef = await addDoc(collection(db, "projects"), {
                   title: newProject.title.trim(),
                   description: newProject.description.trim(),
                   owner_uid: user.uid,
@@ -231,10 +242,20 @@ export function Dashboard() {
                   createdAt: serverTimestamp(),
                   updatedAt: serverTimestamp()
                 });
+
+                // Also add owner to participants subcollection
+                await setDoc(doc(db, "projects", projectRef.id, "participants", user.uid), {
+                  uid: user.uid,
+                  role: 'owner',
+                  active: true,
+                  joinedAt: serverTimestamp()
+                });
+
                 toast.success("Проект создан!");
                 setShowNewProject(false);
                 setNewProject({ title: "", description: "" });
               } catch (error) {
+                console.error("Create project error:", error);
                 toast.error("Ошибка создания проекта");
               } finally {
                 setLoading(false);

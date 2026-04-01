@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { db, handleFirestoreError, OperationType } from "../firebase";
+import { db, handleFirestoreError, OperationType, safeSnapshot } from "../firebase";
 import { 
   doc, 
-  onSnapshot, 
   collection, 
   query, 
   orderBy, 
@@ -42,7 +41,8 @@ import {
   Search,
   X,
   Shield,
-  UserMinus
+  UserMinus,
+  AlertTriangle
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "../lib/utils";
@@ -74,6 +74,8 @@ const ParticipantItem: React.FC<ParticipantItemProps> = ({ uid, isOwner, role, o
     seller: 'Продавец'
   };
 
+  const displayRole = isOwner ? 'owner' : (role || 'seller');
+
   return (
     <div className={cn("flex items-center justify-between group relative", showMenu ? "z-30" : "z-0")}>
       <div className="flex items-center gap-3">
@@ -85,7 +87,7 @@ const ParticipantItem: React.FC<ParticipantItemProps> = ({ uid, isOwner, role, o
             {profile?.name || "Загрузка..."}
           </div>
           <div className="text-[10px] text-slate-500 uppercase tracking-widest font-black">
-            {roleLabels[role as keyof typeof roleLabels] || (isOwner ? "Владелец" : "Участник")}
+            {roleLabels[displayRole as keyof typeof roleLabels] || "Участник"}
           </div>
         </div>
       </div>
@@ -148,6 +150,13 @@ const ParticipantItem: React.FC<ParticipantItemProps> = ({ uid, isOwner, role, o
   );
 }
 
+const WarningBanner = ({ message }: { message: string }) => (
+  <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 mb-6 flex items-center gap-3 animate-in fade-in slide-in-from-top-4 duration-500">
+    <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0" />
+    <p className="text-sm text-amber-200/80 font-medium">{message}</p>
+  </div>
+);
+
 export function ProjectDetails() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
@@ -161,6 +170,7 @@ export function ProjectDetails() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [subErrors, setSubErrors] = useState<Record<string, boolean>>({});
   const [activeTab, setActiveTab] = useState<'overview' | 'bookings' | 'plans' | 'commissions' | 'chat'>('overview');
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
 
@@ -176,6 +186,7 @@ export function ProjectDetails() {
 
   const isOwner = user?.uid === project?.owner_uid;
   const userParticipant = projectParticipants.find(p => p.uid === user?.uid);
+  const isParticipant = isOwner || project?.participant_uids?.includes(user?.uid || "");
   const canManage = isOwner || userParticipant?.role === 'manager';
 
   const filteredByMonthBookings = bookings.filter(b => {
@@ -196,10 +207,13 @@ export function ProjectDetails() {
     console.log("ProjectDetails mounted with id:", id);
     if (!id || !user) return;
 
+    let isMounted = true;
+
     // Subscribe to project details
-    const unsubscribeProject = onSnapshot(
+    const unsubscribeProject = safeSnapshot(
       doc(db, "projects", id),
-      (docSnap) => {
+      (docSnap: any) => {
+        if (!isMounted) return;
         if (docSnap.exists()) {
           const data = docSnap.data();
           setProject({ 
@@ -215,14 +229,15 @@ export function ProjectDetails() {
         setLoading(false);
       },
       (err) => {
+        if (!isMounted) return;
         console.error("Project details error:", err);
         if (err.code === 'permission-denied') {
           setError("У вас нет прав для просмотра этого проекта или он был удален.");
-        } else {
-          handleFirestoreError(err, OperationType.GET, `projects/${id}`);
         }
         setLoading(false);
-      }
+      },
+      OperationType.GET,
+      `projects/${id}`
     );
 
     // Subscribe to bookings
@@ -231,16 +246,21 @@ export function ProjectDetails() {
       orderBy("createdAt", "desc")
     );
 
-    const unsubscribeBookings = onSnapshot(
+    const unsubscribeBookings = safeSnapshot(
       bookingsQuery,
-      (snapshot) => {
-        const bookingsData = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Booking));
+      (snapshot: any) => {
+        if (!isMounted) return;
+        const bookingsData = snapshot.docs.map((d: any) => ({ id: d.id, ...d.data() } as Booking));
         setBookings(bookingsData);
+        setSubErrors(prev => ({ ...prev, bookings: false }));
       },
       (err) => {
+        if (!isMounted) return;
         console.error("Bookings error:", err);
-        handleFirestoreError(err, OperationType.GET, `projects/${id}/bookings`);
-      }
+        setSubErrors(prev => ({ ...prev, bookings: true }));
+      },
+      OperationType.GET,
+      `projects/${id}/bookings`
     );
 
     // Subscribe to comments
@@ -249,10 +269,11 @@ export function ProjectDetails() {
       orderBy("createdAt", "asc")
     );
 
-    const unsubscribeComments = onSnapshot(
+    const unsubscribeComments = safeSnapshot(
       commentsQuery,
-      async (snapshot) => {
-        const commentsData = await Promise.all(snapshot.docs.map(async (d) => {
+      async (snapshot: any) => {
+        if (!isMounted) return;
+        const commentsData = await Promise.all(snapshot.docs.map(async (d: any) => {
           const data = d.data() as ProjectComment;
           let author: UserProfile | undefined;
           try {
@@ -263,12 +284,15 @@ export function ProjectDetails() {
           }
           return { id: d.id, ...data, author };
         }));
-        setComments(commentsData);
+        if (isMounted) setComments(commentsData);
       },
       (err) => {
+        if (!isMounted) return;
         console.error("Comments error:", err);
-        // Don't fail the whole page if comments fail
-      }
+        setSubErrors(prev => ({ ...prev, chat: true }));
+      },
+      OperationType.GET,
+      `projects/${id}/comments`
     );
 
     // Subscribe to plans
@@ -277,33 +301,44 @@ export function ProjectDetails() {
       orderBy("startDate", "desc")
     );
 
-    const unsubscribePlans = onSnapshot(
+    const unsubscribePlans = safeSnapshot(
       plansQuery,
-      (snapshot) => {
-        const plansData = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Plan));
+      (snapshot: any) => {
+        if (!isMounted) return;
+        const plansData = snapshot.docs.map((d: any) => ({ id: d.id, ...d.data() } as Plan));
         setPlans(plansData);
+        setSubErrors(prev => ({ ...prev, plans: false }));
       },
       (err) => {
+        if (!isMounted) return;
         console.error("Plans error:", err);
-        handleFirestoreError(err, OperationType.GET, `projects/${id}/plans`);
-      }
+        setSubErrors(prev => ({ ...prev, plans: true }));
+      },
+      OperationType.GET,
+      `projects/${id}/plans`
     );
 
     // Subscribe to participants
     const participantsQuery = collection(db, "projects", id, "participants");
-    const unsubscribeParticipants = onSnapshot(
+    const unsubscribeParticipants = safeSnapshot(
       participantsQuery,
-      (snapshot) => {
-        const participantsData = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as ProjectParticipant));
+      (snapshot: any) => {
+        if (!isMounted) return;
+        const participantsData = snapshot.docs.map((d: any) => ({ id: d.id, ...d.data() } as ProjectParticipant));
         setProjectParticipants(participantsData);
+        setSubErrors(prev => ({ ...prev, participants: false }));
       },
       (err) => {
+        if (!isMounted) return;
         console.error("Participants error:", err);
-        // Don't fail the whole page if participants fail
-      }
+        setSubErrors(prev => ({ ...prev, participants: true }));
+      },
+      OperationType.GET,
+      `projects/${id}/participants`
     );
 
     return () => {
+      isMounted = false;
       unsubscribeProject();
       unsubscribeBookings();
       unsubscribePlans();
@@ -483,8 +518,25 @@ export function ProjectDetails() {
 
   if (!project) return null;
 
+  const WarningBanner = ({ message }: { message: string }) => (
+    <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 flex items-center gap-3 mb-6 animate-in fade-in slide-in-from-top-2">
+      <AlertCircle className="w-5 h-5 text-amber-500 shrink-0" />
+      <p className="text-sm text-amber-200 font-medium">{message}</p>
+    </div>
+  );
+
   return (
     <div className="max-w-5xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
+      {/* Warning Banners */}
+      {Object.values(subErrors).some(v => v) && (
+        <WarningBanner message="Некоторые данные проекта временно недоступны. Проверьте соединение или права доступа." />
+      )}
+
+      {/* Warning Banner for sub-errors */}
+      {Object.values(subErrors).some(v => v) && (
+        <WarningBanner message="Некоторые данные (участники, планы или чат) временно недоступны из-за ограничений доступа. Мы используем сохраненные данные проекта." />
+      )}
+
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
         <div className="space-y-4">
@@ -784,7 +836,7 @@ export function ProjectDetails() {
                           <div key={plan.id} className="p-4 bg-white/5 rounded-2xl border border-white/5 space-y-3">
                             <div className="flex items-center justify-between">
                               <div className="text-sm font-bold text-white">
-                                {project?.participants?.find((p: any) => p.uid === plan.uid)?.role || 'Участник'}
+                                {projectParticipants.find((p: any) => p.uid === plan.uid)?.role || 'Участник'}
                               </div>
                               <div className="text-xs font-bold text-indigo-400">
                                 {userNet.toLocaleString('ru-RU')} / {plan.target.toLocaleString('ru-RU')} ₽
@@ -909,7 +961,7 @@ export function ProjectDetails() {
                     const achievement = plan.target > 0 ? (net / plan.target) * 100 : 0;
                     
                     // Get base rate from participant data if available
-                    const participant = project?.participants?.find((p: any) => p.uid === plan.uid);
+                    const participant = projectParticipants.find((p: any) => p.uid === plan.uid);
                     let rate = participant?.commissionBaseRate || 0.03;
                     
                     // Progressive rate logic (example from TZ context)

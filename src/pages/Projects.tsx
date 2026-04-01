@@ -1,15 +1,16 @@
 import React, { useEffect, useState } from "react";
-import { db, handleFirestoreError, OperationType } from "../firebase";
+import { db, handleFirestoreError, OperationType, safeSnapshot } from "../firebase";
 import { 
   collection, 
   query, 
   where, 
-  onSnapshot, 
   addDoc, 
   serverTimestamp,
   getDocs,
   orderBy,
-  Timestamp
+  Timestamp,
+  doc,
+  setDoc
 } from "firebase/firestore";
 import { useAuth } from "../components/FirebaseProvider";
 import { Project } from "../types";
@@ -88,29 +89,34 @@ export function Projects() {
       orderBy("updatedAt", "desc")
     );
 
-    unsub1 = onSnapshot(ownerQuery, (snapshot) => {
-      ownerDocs = processDocs(snapshot.docs);
-      updateState();
-    }, (err) => {
-      console.error("Projects owner query error:", err);
-      if (err.code === 'permission-denied') {
-        toast.error("Доступ к некоторым проектам ограничен");
-      } else {
-        handleFirestoreError(err, OperationType.LIST, "projects");
-      }
-    });
+    unsub1 = safeSnapshot(
+      ownerQuery,
+      (snapshot: any) => {
+        ownerDocs = processDocs(snapshot.docs);
+        updateState();
+      },
+      (err) => {
+        console.error("Projects owner query error:", err);
+        if (err.code === 'permission-denied') {
+          toast.error("Доступ к некоторым проектам ограничен");
+        }
+      },
+      OperationType.LIST,
+      "projects"
+    );
 
-    unsub2 = onSnapshot(participantQuery, (snapshot) => {
-      participantDocs = processDocs(snapshot.docs);
-      updateState();
-    }, (err) => {
-      console.error("Projects participant query error:", err);
-      if (err.code === 'permission-denied') {
-        // Silent or toast
-      } else {
-        handleFirestoreError(err, OperationType.LIST, "projects");
-      }
-    });
+    unsub2 = safeSnapshot(
+      participantQuery,
+      (snapshot: any) => {
+        participantDocs = processDocs(snapshot.docs);
+        updateState();
+      },
+      (err) => {
+        console.error("Projects participant query error:", err);
+      },
+      OperationType.LIST,
+      "projects"
+    );
 
     return () => {
       unsub1();
@@ -124,7 +130,7 @@ export function Projects() {
     setLoading(true);
 
     try {
-      await addDoc(collection(db, "projects"), {
+      const projectRef = await addDoc(collection(db, "projects"), {
         title: newProject.title.trim(),
         description: newProject.description.trim(),
         owner_uid: user.uid,
@@ -133,6 +139,15 @@ export function Projects() {
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
+
+      // Also add owner to participants subcollection
+      await setDoc(doc(db, "projects", projectRef.id, "participants", user.uid), {
+        uid: user.uid,
+        role: 'owner',
+        active: true,
+        joinedAt: serverTimestamp()
+      });
+
       toast.success("Проект создан!");
       setShowNewProject(false);
       setNewProject({ title: "", description: "" });

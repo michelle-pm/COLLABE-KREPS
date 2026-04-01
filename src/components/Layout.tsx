@@ -7,7 +7,8 @@ import {
   Briefcase, 
   Settings, 
   LogOut,
-  TrendingUp
+  TrendingUp,
+  Shield
 } from "lucide-react";
 import { auth } from "../firebase";
 import { useAuth } from "./FirebaseProvider";
@@ -71,6 +72,23 @@ export function Layout() {
                 <span className="font-medium">{item.label}</span>
               </Link>
             ))}
+            {profile?.role === 'admin' && (
+              <Link
+                to="/admin"
+                className={cn(
+                  "flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 group",
+                  location.pathname === "/admin"
+                    ? "bg-indigo-500/10 text-indigo-400 border border-indigo-500/20"
+                    : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
+                )}
+              >
+                <Shield className={cn(
+                  "w-5 h-5 transition-transform duration-200 group-hover:scale-110",
+                  location.pathname === "/admin" ? "text-indigo-400" : "text-slate-500"
+                )} />
+                <span className="font-medium">Админ</span>
+              </Link>
+            )}
           </nav>
 
           <div className="p-4 mt-auto border-t border-white/5">

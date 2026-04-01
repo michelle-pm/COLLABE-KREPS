@@ -12,6 +12,7 @@ import { Friends } from "./pages/Friends";
 import { Messages } from "./pages/Messages";
 import { Projects } from "./pages/Projects";
 import { ProjectDetails } from "./pages/ProjectDetails";
+import { Admin } from "./pages/Admin";
 import { Settings } from "./pages/Settings";
 import { Auth } from "./pages/Auth";
 import { Toaster } from "sonner";
@@ -42,6 +43,7 @@ export default function App() {
             <Route path="messages" element={<Messages />} />
             <Route path="projects" element={<Projects />} />
             <Route path="projects/:id" element={<ProjectDetails />} />
+            <Route path="admin" element={<Admin />} />
             <Route path="settings" element={<Settings />} />
           </Route>
         </Routes>
