@@ -58,3 +58,72 @@ export interface ProjectComment {
   text: string;
   createdAt: any;
 }
+
+export interface Booking {
+  id: string;
+  projectId: string;
+  sellerUid: string;
+  code: string;
+  source: string;
+  bookingDate: any;
+  cancelDate?: any;
+  checkIn: any;
+  checkOut: any;
+  category: string;
+  roomNumber: string;
+  total: number;
+  status: 'active' | 'cancelled';
+  createdAt: any;
+}
+
+export interface Plan {
+  id: string;
+  projectId: string;
+  uid?: string; // If undefined, it's a company-wide plan
+  type: 'personal' | 'company';
+  period: 'week' | 'month' | 'year';
+  target: number;
+  actual: number;
+  startDate: any;
+  endDate: any;
+  createdAt: any;
+}
+
+export interface Penalty {
+  id: string;
+  projectId: string;
+  uid: string;
+  amount: number;
+  reason: string;
+  date: any;
+  createdAt: any;
+}
+
+export interface Commission {
+  id: string;
+  projectId: string;
+  uid: string;
+  month: string; // YYYY-MM
+  gross: number;
+  cancelled: number;
+  net: number;
+  rate: number;
+  bonus: number;
+  penalties: number;
+  finalAmount: number;
+  updatedAt: any;
+}
+
+export interface BookingUpload {
+  id: string;
+  projectId: string;
+  uploaderUid: string;
+  fileName: string;
+  status: 'processing' | 'success' | 'partial' | 'failed';
+  stats?: {
+    new: number;
+    updated: number;
+    rejected: number;
+  };
+  createdAt: any;
+}
