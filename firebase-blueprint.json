@@ -1,0 +1,100 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with role and company association",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["owner", "manager", "seller", "viewer"] },
+        "companyId": { "type": "string" },
+        "alias": { "type": "string", "description": "Alias for Excel group matching" }
+      },
+      "required": ["uid", "email", "role", "companyId"]
+    },
+    "Company": {
+      "title": "Company",
+      "description": "Tenant organization",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "ownerId": { "type": "string" }
+      },
+      "required": ["id", "name", "ownerId"]
+    },
+    "Booking": {
+      "title": "Booking",
+      "description": "Individual booking record",
+      "type": "object",
+      "properties": {
+        "booking_code": { "type": "string" },
+        "source": { "type": "string" },
+        "raw_group": { "type": "string" },
+        "booking_date": { "type": "string", "format": "date" },
+        "cancellation_date": { "type": "string", "format": "date" },
+        "checkin_datetime": { "type": "string", "format": "date-time" },
+        "checkout_datetime": { "type": "string", "format": "date-time" },
+        "category": { "type": "string" },
+        "room": { "type": "string" },
+        "total_amount": { "type": "number" },
+        "sellerId": { "type": "string" },
+        "companyId": { "type": "string" },
+        "uploadId": { "type": "string" },
+        "monthKey": { "type": "string", "description": "YYYY-MM based on check-in" }
+      },
+      "required": ["booking_code", "total_amount", "companyId", "checkin_datetime"]
+    },
+    "Plan": {
+      "title": "Plan",
+      "description": "Sales target for a month",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "month": { "type": "string", "description": "YYYY-MM" },
+        "target_amount": { "type": "number" },
+        "companyId": { "type": "string" },
+        "userId": { "type": "string", "description": "Optional for personal plans" }
+      },
+      "required": ["month", "target_amount", "companyId"]
+    },
+    "Penalty": {
+      "title": "Penalty",
+      "description": "Penalty event for a seller",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "companyId": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "amount": { "type": "number" },
+        "reason": { "type": "string" }
+      },
+      "required": ["userId", "companyId", "amount", "date"]
+    }
+  },
+  "firestore": {
+    "/companies/{companyId}": {
+      "schema": "Company",
+      "description": "Company details"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/bookings/{bookingId}": {
+      "schema": "Booking",
+      "description": "Bookings records"
+    },
+    "/plans/{planId}": {
+      "schema": "Plan",
+      "description": "Sales plans"
+    },
+    "/penalties/{penaltyId}": {
+      "schema": "Penalty",
+      "description": "Penalty events"
+    }
+  }
+}

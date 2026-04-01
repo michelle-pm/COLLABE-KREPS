@@ -1,0 +1,110 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Вспомогательная функция: проверка, является ли пользователь участником чата по его ID
+    // ID чата формируется как "uid1_uid2" (в алфавитном порядке)
+    function isUserInChatId(chatId) {
+       return chatId.matches(request.auth.uid + '_.*') || chatId.matches('.*_' + request.auth.uid);
+    }
+
+    // 👤 Пользователи
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth.uid == userId;
+    }
+
+    // 🤝 Друзья
+    match /friends/{friendDocId} {
+      allow read: if request.auth != null &&
+        (request.auth.uid == resource.data.participant1 || request.auth.uid == resource.data.participant2);
+      allow create: if request.auth != null &&
+        (request.auth.uid == request.resource.data.participant1 || request.auth.uid == request.resource.data.participant2) &&
+        request.resource.data.participant1 != request.resource.data.participant2;
+      allow update, delete: if request.auth != null &&
+        (request.auth.uid == resource.data.participant1 || request.auth.uid == resource.data.participant2);
+    }
+
+    // 📩 Заявки в друзья
+    match /friend_requests/{requestId} {
+      allow read: if request.auth != null &&
+        (request.auth.uid == resource.data.from || request.auth.uid == resource.data.to);
+      allow create: if request.auth != null &&
+        request.resource.data.from == request.auth.uid &&
+        request.resource.data.from != request.resource.data.to;
+      allow update, delete: if request.auth != null &&
+        (request.auth.uid == resource.data.to || request.auth.uid == resource.data.from);
+    }
+
+    // 💬 Чаты
+    match /chats/{chatId} {
+      // Чтение: Если документ существует, проверяем participants. 
+      // Если документа нет (или для оптимизации), проверяем ID чата.
+      allow read: if request.auth != null && (
+        (resource != null && request.auth.uid in resource.data.participants) ||
+        isUserInChatId(chatId)
+      );
+      
+      // Запись/Создание: Если пользователь в списке participants
+      allow create, update: if request.auth != null && 
+        request.auth.uid in request.resource.data.participants;
+
+      // ✉️ Сообщения
+      match /messages/{messageId} {
+        // Разрешаем чтение, если пользователь участник чата ИЛИ входит в ID чата
+        allow read: if request.auth != null && (
+           (exists(/databases/$(database)/documents/chats/$(chatId)) && 
+            request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants) ||
+           isUserInChatId(chatId)
+        );
+
+        // Разрешаем ОБНОВЛЕНИЕ (update) - проверяем новые данные (request.resource)
+        allow update: if request.auth != null && 
+           resource.data.senderId == request.auth.uid && // Автор старого сообщения - это вы
+           request.resource.data.senderId == request.auth.uid; // Вы не пытаетесь подменить автора
+
+        // Разрешаем УДАЛЕНИЕ (delete) - при удалении request.resource пуст, проверяем resource.data
+        allow delete: if request.auth != null && 
+           resource.data.senderId == request.auth.uid;
+      
+        // Разрешаем создание, если пользователь отправитель
+        allow create: if request.auth != null &&
+           request.resource.data.senderId == request.auth.uid && (
+             (exists(/databases/$(database)/documents/chats/$(chatId)) && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants) ||
+             (existsAfter(/databases/$(database)/documents/chats/$(chatId)) && request.auth.uid in getAfter(/databases/$(database)/documents/chats/$(chatId)).data.participants) ||
+             isUserInChatId(chatId)
+           );
+      }
+    }
+    
+    // 💼 Проекты
+    match /projects/{projectId} {
+      allow read: if request.auth != null &&
+        (request.auth.uid == resource.data.owner_uid ||
+         request.auth.uid in resource.data.participant_uids);
+      allow create: if request.auth != null &&
+        request.auth.uid == request.resource.data.owner_uid;
+      allow update: if request.auth != null && (
+        request.auth.uid == resource.data.owner_uid || 
+        (request.auth.uid in resource.data.participant_uids && 
+         request.resource.data.owner_uid == resource.data.owner_uid && 
+         request.resource.data.participant_uids == resource.data.participant_uids 
+        )
+      );
+      allow delete: if request.auth != null && request.auth.uid == resource.data.owner_uid;
+    }
+
+    // 💬 Комментарии к проектам
+    match /projects/{projectId}/comments/{commentId} {
+      allow read: if request.auth != null &&
+        (request.auth.uid == get(/databases/$(database)/documents/projects/$(projectId)).data.owner_uid ||
+         request.auth.uid in get(/databases/$(database)/documents/projects/$(projectId)).data.participant_uids);
+      allow create: if request.auth != null &&
+        request.auth.uid == request.resource.data.authorUid && 
+        (request.auth.uid in get(/databases/$(database)/documents/projects/$(projectId)).data.participant_uids);
+      allow update, delete: if request.auth != null &&
+        request.auth.uid == resource.data.authorUid && 
+        (request.auth.uid in get(/databases/$(database)/documents/projects/$(projectId)).data.participant_uids);
+    }
+  }
+}

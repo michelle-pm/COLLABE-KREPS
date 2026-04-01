@@ -1,0 +1,5 @@
+{
+  "name": "Sales Control App",
+  "description": "Full-cycle sales management: weekly Excel imports, KPI tracking, commission calculation, and risk-based weekly reviews.",
+  "requestFramePermissions": []
+}
