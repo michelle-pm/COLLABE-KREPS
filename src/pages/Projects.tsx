@@ -37,57 +37,85 @@ export function Projects() {
   const [newProject, setNewProject] = useState({ title: "", description: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'completed' | 'archived'>('all');
+
+  const filteredProjects = projects.filter(p => {
+    const matchesSearch = p.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                         p.description.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesStatus = statusFilter === 'all' || p.status === statusFilter;
+    return matchesSearch && matchesStatus;
+  });
 
   useEffect(() => {
     if (!user) return;
 
-    const projectsQuery = query(
+    // Fetch projects using 2 safe queries
+    let unsub1: () => void = () => {};
+    let unsub2: () => void = () => {};
+
+    const processDocs = (docs: any[]) => {
+      return docs.map(doc => {
+        const data = doc.data();
+        return { 
+          id: doc.id, 
+          ...data,
+          updatedAt: data.updatedAt instanceof Timestamp ? data.updatedAt.toDate().toISOString() : data.updatedAt
+        } as Project;
+      });
+    };
+
+    let ownerDocs: Project[] = [];
+    let participantDocs: Project[] = [];
+
+    const updateState = () => {
+      const combined = [...ownerDocs, ...participantDocs];
+      const unique = Array.from(new Map(combined.map(p => [p.id, p])).values());
+      const sorted = unique.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      setProjects(sorted);
+      setError(null);
+    };
+
+    const ownerQuery = query(
+      collection(db, "projects"),
+      where("owner_uid", "==", user.uid),
+      orderBy("updatedAt", "desc")
+    );
+
+    const participantQuery = query(
       collection(db, "projects"),
       where("participant_uids", "array-contains", user.uid),
       orderBy("updatedAt", "desc")
     );
 
-    const unsubscribe = onSnapshot(
-      projectsQuery, 
-      (snapshot) => {
-        const projectsData = snapshot.docs.map(doc => {
-          const data = doc.data();
-          return { 
-            id: doc.id, 
-            ...data,
-            updatedAt: data.updatedAt instanceof Timestamp ? data.updatedAt.toDate().toISOString() : data.updatedAt
-          } as Project;
-        });
-        setProjects(projectsData);
-        setError(null);
-      },
-      (err) => {
-        console.error("Projects query error:", err);
-        // If index is missing, try a simpler query
-        if (err.code === 'failed-precondition') {
-          const simpleQuery = query(
-            collection(db, "projects"),
-            where("participant_uids", "array-contains", user.uid)
-          );
-          getDocs(simpleQuery).then(snapshot => {
-            const projectsData = snapshot.docs.map(doc => {
-              const data = doc.data();
-              return { 
-                id: doc.id, 
-                ...data,
-                updatedAt: data.updatedAt instanceof Timestamp ? data.updatedAt.toDate().toISOString() : data.updatedAt
-              } as Project;
-            }).sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-            setProjects(projectsData);
-            setError("Индексы еще создаются, сортировка может быть неточной.");
-          }).catch(e => console.error("Fallback query failed:", e));
-        } else {
-          handleFirestoreError(err, OperationType.LIST, "projects");
-        }
+    unsub1 = onSnapshot(ownerQuery, (snapshot) => {
+      ownerDocs = processDocs(snapshot.docs);
+      updateState();
+    }, (err) => {
+      console.error("Projects owner query error:", err);
+      if (err.code === 'permission-denied') {
+        toast.error("Доступ к некоторым проектам ограничен");
+      } else {
+        handleFirestoreError(err, OperationType.LIST, "projects");
       }
-    );
+    });
 
-    return () => unsubscribe();
+    unsub2 = onSnapshot(participantQuery, (snapshot) => {
+      participantDocs = processDocs(snapshot.docs);
+      updateState();
+    }, (err) => {
+      console.error("Projects participant query error:", err);
+      if (err.code === 'permission-denied') {
+        // Silent or toast
+      } else {
+        handleFirestoreError(err, OperationType.LIST, "projects");
+      }
+    });
+
+    return () => {
+      unsub1();
+      unsub2();
+    };
   }, [user]);
 
   const handleCreateProject = async (e: React.FormEvent) => {
@@ -138,14 +166,22 @@ export function Projects() {
           <input 
             type="text" 
             placeholder="Поиск по проектам..." 
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 pl-12 pr-4 text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all"
           />
         </div>
         <div className="flex items-center gap-2">
-          <button className="bg-white/5 border border-white/10 text-slate-400 px-4 py-4 rounded-2xl flex items-center gap-2 hover:text-white hover:bg-white/10 transition-all">
-            <Filter className="w-5 h-5" />
-            Фильтры
-          </button>
+          <select 
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as any)}
+            className="bg-white/5 border border-white/10 text-slate-400 px-4 py-4 rounded-2xl flex items-center gap-2 hover:text-white hover:bg-white/10 transition-all focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+          >
+            <option value="all">Все статусы</option>
+            <option value="active">Активные</option>
+            <option value="completed">Завершенные</option>
+            <option value="archived">Архивные</option>
+          </select>
         </div>
       </div>
 
@@ -158,8 +194,8 @@ export function Projects() {
 
       {/* Projects Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-        {projects.length > 0 ? (
-          projects.map((project) => (
+        {filteredProjects.length > 0 ? (
+          filteredProjects.map((project) => (
             <div 
               key={project.id} 
               onClick={() => {
@@ -169,7 +205,13 @@ export function Projects() {
               className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl p-6 hover:bg-white/10 transition-all group relative overflow-hidden cursor-pointer"
             >
               <div className="absolute top-0 right-0 p-4">
-                <button className="text-slate-600 hover:text-white transition-colors">
+                <button 
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toast.info("Меню проекта в разработке");
+                  }}
+                  className="text-slate-600 hover:text-white transition-colors p-2 rounded-xl hover:bg-white/5"
+                >
                   <MoreVertical className="w-5 h-5" />
                 </button>
               </div>

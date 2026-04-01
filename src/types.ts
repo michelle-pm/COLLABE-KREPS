@@ -51,6 +51,14 @@ export interface Project {
   updatedAt: any;
 }
 
+export interface ProjectParticipant {
+  id: string; // uid
+  uid: string;
+  role: 'owner' | 'manager' | 'seller';
+  commissionBaseRate: number;
+  active: boolean;
+}
+
 export interface ProjectComment {
   id: string;
   projectId: string;
@@ -66,20 +74,19 @@ export interface Booking {
   code: string;
   source: string;
   bookingDate: any;
-  cancelDate?: any;
+  saleDate?: any; // If specified, used for month split
   checkIn: any;
   checkOut: any;
-  category: string;
-  roomNumber: string;
   total: number;
   status: 'active' | 'cancelled';
   createdAt: any;
+  updatedAt: any;
 }
 
 export interface Plan {
   id: string;
   projectId: string;
-  uid?: string; // If undefined, it's a company-wide plan
+  uid: string | null; // null for company-wide plan
   type: 'personal' | 'company';
   period: 'week' | 'month' | 'year';
   target: number;
@@ -93,23 +100,38 @@ export interface Penalty {
   id: string;
   projectId: string;
   uid: string;
-  amount: number;
+  percent: number; // usually 0.003
   reason: string;
-  date: any;
+  weekStart: any;
+  weekEnd: any;
+  createdBy: string;
+  createdAt: any;
+}
+
+export interface Review {
+  id: string;
+  projectId: string;
+  uid: string;
+  weekStart: any;
+  weekEnd: any;
+  mistakes: string[];
+  comment: string;
+  createdBy: string;
   createdAt: any;
 }
 
 export interface Commission {
-  id: string;
+  id: string; // uid_YYYY_MM
   projectId: string;
   uid: string;
   month: string; // YYYY-MM
   gross: number;
   cancelled: number;
   net: number;
-  rate: number;
-  bonus: number;
-  penalties: number;
+  baseRate: number;
+  bonusRate: number;
+  penaltyRate: number;
+  finalRate: number;
   finalAmount: number;
   updatedAt: any;
 }

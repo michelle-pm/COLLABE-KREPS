@@ -12,10 +12,13 @@ import {
   Plus,
   Search,
   AlertCircle,
-  X
+  X,
+  RefreshCw
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
+
+import { migrateProjectsData } from "../services/migrationService";
 
 export function Dashboard() {
   const { user } = useAuth();
@@ -23,19 +26,66 @@ export function Dashboard() {
   const [stats, setStats] = useState({
     activeProjects: 0,
     totalFriends: 0,
-    unreadMessages: 0
+    unreadMessages: 0,
+    totalFriends1: 0,
+    totalFriends2: 0
   });
   const [showNewProject, setShowNewProject] = useState(false);
   const [newProject, setNewProject] = useState({ title: "", description: "" });
   const [loading, setLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [migrating, setMigrating] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
+
+  const isAdmin = user?.uid === "naC25hhpwxcL49gcLSR9QNgsfto1" || 
+                  user?.email === "kreps.michaelle@gmail.com" ||
+                  user?.email === "michelle-kreps@yandex.ru";
+
+  const filteredProjects = projects.filter(p => 
+    p.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    p.description.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
   useEffect(() => {
     if (!user) return;
 
-    // Fetch active projects
-    const projectsQuery = query(
+    // Fetch active projects using 2 safe queries
+    let unsub1: () => void = () => {};
+    let unsub2: () => void = () => {};
+
+    const processDocs = (docs: any[]) => {
+      return docs.map(doc => {
+        const data = doc.data();
+        return { 
+          id: doc.id, 
+          ...data,
+          updatedAt: data.updatedAt instanceof Timestamp ? data.updatedAt.toDate().toISOString() : data.updatedAt
+        } as Project;
+      });
+    };
+
+    let ownerDocs: Project[] = [];
+    let participantDocs: Project[] = [];
+
+    const updateState = () => {
+      const combined = [...ownerDocs, ...participantDocs];
+      const unique = Array.from(new Map(combined.map(p => [p.id, p])).values());
+      const sorted = unique.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()).slice(0, 5);
+      setProjects(sorted);
+      setStats(prev => ({ ...prev, activeProjects: unique.length }));
+      setError(null);
+    };
+
+    const ownerQuery = query(
+      collection(db, "projects"),
+      where("owner_uid", "==", user.uid),
+      where("status", "==", "active"),
+      orderBy("updatedAt", "desc"),
+      limit(5)
+    );
+
+    const participantQuery = query(
       collection(db, "projects"),
       where("participant_uids", "array-contains", user.uid),
       where("status", "==", "active"),
@@ -43,48 +93,29 @@ export function Dashboard() {
       limit(5)
     );
 
-    const unsubscribeProjects = onSnapshot(
-      projectsQuery, 
-      (snapshot) => {
-        const projectsData = snapshot.docs.map(doc => {
-          const data = doc.data();
-          return { 
-            id: doc.id, 
-            ...data,
-            updatedAt: data.updatedAt instanceof Timestamp ? data.updatedAt.toDate().toISOString() : data.updatedAt
-          } as Project;
-        });
-        setProjects(projectsData);
-        setStats(prev => ({ ...prev, activeProjects: snapshot.size }));
-      },
-      (err) => {
-        console.error("Dashboard projects error:", err);
-        if (err.code === 'failed-precondition') {
-          setError("Для быстрой работы требуется создать индекс в Firebase. Вы можете сделать это по ссылке из консоли браузера или подождать, пока мы загрузим данные в упрощенном режиме.");
-          // Fallback for missing index - fetch all user projects and filter in memory
-          const simpleQuery = query(
-            collection(db, "projects"),
-            where("participant_uids", "array-contains", user.uid)
-          );
-          getDocs(simpleQuery).then(snapshot => {
-            const projectsData = snapshot.docs
-              .map(doc => {
-                const data = doc.data();
-                return { 
-                  id: doc.id, 
-                  ...data,
-                  updatedAt: data.updatedAt instanceof Timestamp ? data.updatedAt.toDate().toISOString() : data.updatedAt
-                } as Project;
-              })
-              .filter(p => p.status === "active")
-              .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-              .slice(0, 5);
-            setProjects(projectsData);
-            setStats(prev => ({ ...prev, activeProjects: projectsData.length }));
-          }).catch(e => console.error("Fallback query failed:", e));
-        }
+    unsub1 = onSnapshot(ownerQuery, (snapshot) => {
+      ownerDocs = processDocs(snapshot.docs);
+      updateState();
+    }, (err) => {
+      console.error("Dashboard owner projects error:", err);
+      if (err.code === 'permission-denied') {
+        toast.error("Доступ к некоторым проектам ограничен");
+      } else {
+        handleFirestoreError(err, OperationType.GET, "projects");
       }
-    );
+    });
+
+    unsub2 = onSnapshot(participantQuery, (snapshot) => {
+      participantDocs = processDocs(snapshot.docs);
+      updateState();
+    }, (err) => {
+      console.error("Dashboard participant projects error:", err);
+      if (err.code === 'permission-denied') {
+        // Silent or toast
+      } else {
+        handleFirestoreError(err, OperationType.GET, "projects");
+      }
+    });
 
     // Fetch friends count - separate listeners to avoid nesting
     const friendsQuery = query(
@@ -100,21 +131,42 @@ export function Dashboard() {
 
     const unsubscribeFriends1 = onSnapshot(friendsQuery, (s1) => {
       setStats(prev => ({ ...prev, totalFriends1: s1.size }));
+    }, (err) => {
+      console.error("Dashboard friends 1 error:", err);
+      if (err.code !== 'permission-denied') {
+        handleFirestoreError(err, OperationType.GET, "friends");
+      }
     });
 
     const unsubscribeFriends2 = onSnapshot(friendsQuery2, (s2) => {
       setStats(prev => ({ ...prev, totalFriends2: s2.size }));
+    }, (err) => {
+      console.error("Dashboard friends 2 error:", err);
+      if (err.code !== 'permission-denied') {
+        handleFirestoreError(err, OperationType.GET, "friends");
+      }
     });
 
     return () => {
-      unsubscribeProjects();
+      unsub1();
+      unsub2();
       unsubscribeFriends1();
       unsubscribeFriends2();
     };
   }, [user]);
 
   // Derived stats to avoid state update loops
-  const totalFriends = (stats as any).totalFriends1 + (stats as any).totalFriends2 || 0;
+  const totalFriends = stats.totalFriends1 + stats.totalFriends2 || 0;
+
+  const handleMigrate = async () => {
+    if (!isAdmin) return;
+    setMigrating(true);
+    try {
+      await migrateProjectsData();
+    } finally {
+      setMigrating(false);
+    }
+  };
 
   return (
     <div className="space-y-8 animate-in fade-in duration-700">
@@ -123,13 +175,25 @@ export function Dashboard() {
         <div>
           <h1 className="text-4xl font-bold text-white tracking-tight">Панель управления</h1>
           <p className="text-slate-400 mt-2">Добро пожаловать в ваше рабочее пространство.</p>
+          {isAdmin && (
+            <button 
+              onClick={handleMigrate}
+              disabled={migrating}
+              className="mt-4 text-xs bg-white/5 hover:bg-white/10 text-slate-400 px-3 py-1 rounded-lg border border-white/10 transition-all flex items-center gap-2"
+            >
+              <RefreshCw className={`w-3 h-3 ${migrating ? 'animate-spin' : ''}`} />
+              {migrating ? "Миграция..." : "Запустить миграцию данных"}
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-3">
           <div className="relative group">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 group-focus-within:text-indigo-400 transition-colors" />
             <input 
               type="text" 
-              placeholder="Поиск..." 
+              placeholder="Поиск проектов..." 
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
               className="bg-white/5 border border-white/10 rounded-xl py-2 pl-10 pr-4 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all w-64"
             />
           </div>
@@ -257,8 +321,8 @@ export function Dashboard() {
           </div>
 
           <div className="space-y-4">
-            {projects.length > 0 ? (
-              projects.map((project) => (
+            {filteredProjects.length > 0 ? (
+              filteredProjects.map((project) => (
                 <Link 
                   key={project.id} 
                   to={`/projects/${project.id}`}
@@ -281,8 +345,17 @@ export function Dashboard() {
               ))
             ) : (
               <div className="text-center py-8">
-                <p className="text-slate-500">У вас пока нет активных проектов.</p>
-                <button className="text-indigo-400 font-semibold mt-2 hover:underline">Создать первый проект</button>
+                <p className="text-slate-500">
+                  {searchQuery ? "Проекты не найдены" : "У вас пока нет активных проектов."}
+                </p>
+                {!searchQuery && (
+                  <button 
+                    onClick={() => setShowNewProject(true)}
+                    className="text-indigo-400 font-semibold mt-2 hover:underline"
+                  >
+                    Создать первый проект
+                  </button>
+                )}
               </div>
             )}
           </div>

@@ -2,6 +2,32 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // Вспомогательная функция: проверка авторизации
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Вспомогательная функция: проверка прав администратора
+    function isAdmin() {
+      return request.auth != null && (
+        request.auth.uid == "naC25hhpwxcL49gcLSR9QNgsfto1" ||
+        request.auth.token.email == "kreps.michaelle@gmail.com" ||
+        request.auth.token.email == "michelle-kreps@yandex.ru"
+      );
+    }
+
+    // Проверка роли администратора в базе данных
+    function isRoleAdmin() {
+      return request.auth != null && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    // Глобальное разрешение для администраторов
+    match /{document=**} {
+      allow read, write: if isAdmin() || isRoleAdmin();
+    }
+
     // Вспомогательная функция: проверка, является ли пользователь участником чата по его ID
     // ID чата формируется как "uid1_uid2" (в алфавитном порядке)
     function isUserInChatId(chatId) {
@@ -77,34 +103,104 @@ service cloud.firestore {
       }
     }
     
-    // 💼 Проекты
-    match /projects/{projectId} {
-      allow read: if request.auth != null &&
-        (request.auth.uid == resource.data.owner_uid ||
-         request.auth.uid in resource.data.participant_uids);
-      allow create: if request.auth != null &&
-        request.auth.uid == request.resource.data.owner_uid;
-      allow update: if request.auth != null && (
-        request.auth.uid == resource.data.owner_uid || 
-        (request.auth.uid in resource.data.participant_uids && 
-         request.resource.data.owner_uid == resource.data.owner_uid && 
-         request.resource.data.participant_uids == resource.data.participant_uids 
-        )
-      );
-      allow delete: if request.auth != null && request.auth.uid == resource.data.owner_uid;
+    // Вспомогательная функция для проверки доступа к проекту
+    function isProjectParticipant(projectId) {
+      let project = get(/databases/$(database)/documents/projects/$(projectId)).data;
+      return isAdmin() || isRoleAdmin() || 
+             request.auth.uid == project.owner_uid || 
+             request.auth.uid in project.participant_uids;
     }
 
-    // 💬 Комментарии к проектам
-    match /projects/{projectId}/comments/{commentId} {
-      allow read: if request.auth != null &&
-        (request.auth.uid == get(/databases/$(database)/documents/projects/$(projectId)).data.owner_uid ||
-         request.auth.uid in get(/databases/$(database)/documents/projects/$(projectId)).data.participant_uids);
-      allow create: if request.auth != null &&
-        request.auth.uid == request.resource.data.authorUid && 
-        (request.auth.uid in get(/databases/$(database)/documents/projects/$(projectId)).data.participant_uids);
-      allow update, delete: if request.auth != null &&
-        request.auth.uid == resource.data.authorUid && 
-        (request.auth.uid in get(/databases/$(database)/documents/projects/$(projectId)).data.participant_uids);
+    function isProjectOwner(projectId) {
+      let project = get(/databases/$(database)/documents/projects/$(projectId)).data;
+      return isAdmin() || isRoleAdmin() || request.auth.uid == project.owner_uid;
+    }
+
+    function getParticipantRole(projectId, uid) {
+      let participantPath = /databases/$(database)/documents/projects/$(projectId)/participants/$(uid);
+      return exists(participantPath) ? get(participantPath).data.role : 'none';
+    }
+
+    function isProjectManager(projectId) {
+      return isProjectOwner(projectId) || getParticipantRole(projectId, request.auth.uid) == 'manager';
+    }
+
+    function isProjectSeller(projectId) {
+      return isProjectManager(projectId) || getParticipantRole(projectId, request.auth.uid) == 'seller';
+    }
+
+    // 💼 Проекты
+    match /projects/{projectId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() || isRoleAdmin() ||
+        request.auth.uid == resource.data.owner_uid || 
+        request.auth.uid in resource.data.participant_uids
+      );
+      allow create: if isAuthenticated() &&
+        request.auth.uid == request.resource.data.owner_uid;
+      allow update: if isAuthenticated() && (
+        isProjectManager(projectId) || 
+        (isProjectParticipant(projectId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['updatedAt']))
+      );
+      allow delete: if isAuthenticated() && isProjectOwner(projectId);
+
+      // 👥 Участники проекта
+      match /participants/{uid} {
+        allow read: if isAuthenticated() && isProjectParticipant(projectId);
+        allow write: if isAuthenticated() && isProjectManager(projectId);
+      }
+
+      // 📅 Бронирования
+      match /bookings/{bookingId} {
+        allow read: if isAuthenticated() && isProjectParticipant(projectId);
+        allow create: if isAuthenticated() && isProjectParticipant(projectId);
+        allow update: if isAuthenticated() && (
+          isProjectManager(projectId) || 
+          (isProjectParticipant(projectId) && resource.data.sellerUid == request.auth.uid)
+        );
+        allow delete: if isAuthenticated() && isProjectManager(projectId);
+      }
+
+      // 🎯 Планы
+      match /plans/{planId} {
+        allow read: if isAuthenticated() && isProjectParticipant(projectId);
+        allow write: if isAuthenticated() && isProjectManager(projectId);
+        allow delete: if isAuthenticated() && isProjectManager(projectId);
+      }
+
+      // 📤 Загрузки
+      match /uploads/{uploadId} {
+        allow read: if isAuthenticated() && isProjectParticipant(projectId);
+        allow create: if isAuthenticated() && isProjectManager(projectId);
+        allow update, delete: if isAuthenticated() && isProjectManager(projectId);
+      }
+
+      // 💸 Штрафы
+      match /penalties/{penaltyId} {
+        allow read: if isAuthenticated() && isProjectParticipant(projectId);
+        allow write: if isAuthenticated() && isProjectParticipant(projectId);
+      }
+
+      // 📝 Ревью
+      match /reviews/{reviewId} {
+        allow read: if isAuthenticated() && isProjectParticipant(projectId);
+        allow write: if isAuthenticated() && isProjectParticipant(projectId);
+      }
+
+      // 💰 Комиссии
+      match /commissions/{commissionId} {
+        allow read: if isAuthenticated() && isProjectParticipant(projectId);
+        allow write: if isAuthenticated() && isProjectParticipant(projectId);
+      }
+
+      // 💬 Комментарии к проектам
+      match /comments/{commentId} {
+        allow read: if isAuthenticated() && isProjectParticipant(projectId);
+        allow create: if isAuthenticated() && isProjectParticipant(projectId);
+        allow update, delete: if isAuthenticated() && (
+          request.auth.uid == resource.data.authorUid || isProjectOwner(projectId)
+        );
+      }
     }
   }
 }

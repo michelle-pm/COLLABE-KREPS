@@ -1,100 +1,159 @@
 {
   "entities": {
-    "User": {
-      "title": "User",
-      "description": "User profile with role and company association",
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Global user profile",
       "type": "object",
       "properties": {
         "uid": { "type": "string" },
         "email": { "type": "string", "format": "email" },
         "name": { "type": "string" },
-        "role": { "type": "string", "enum": ["owner", "manager", "seller", "viewer"] },
-        "companyId": { "type": "string" },
-        "alias": { "type": "string", "description": "Alias for Excel group matching" }
+        "photoURL": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "user"] }
       },
-      "required": ["uid", "email", "role", "companyId"]
+      "required": ["uid", "email"]
     },
-    "Company": {
-      "title": "Company",
-      "description": "Tenant organization",
+    "Project": {
+      "title": "Project",
+      "description": "Main project entity",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
-        "name": { "type": "string" },
-        "ownerId": { "type": "string" }
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "owner_uid": { "type": "string" },
+        "participant_uids": { "type": "array", "items": { "type": "string" } },
+        "status": { "type": "string", "enum": ["active", "completed", "archived"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["id", "name", "ownerId"]
+      "required": ["title", "owner_uid", "status"]
+    },
+    "Participant": {
+      "title": "Participant",
+      "description": "Project participant with role",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "role": { "type": "string", "enum": ["owner", "manager", "seller"] },
+        "commissionBaseRate": { "type": "number" },
+        "active": { "type": "boolean" }
+      },
+      "required": ["uid", "role", "active"]
     },
     "Booking": {
       "title": "Booking",
       "description": "Individual booking record",
       "type": "object",
       "properties": {
-        "booking_code": { "type": "string" },
+        "code": { "type": "string" },
+        "sellerUid": { "type": "string" },
+        "bookingDate": { "type": "string", "format": "date-time" },
+        "saleDate": { "type": "string", "format": "date-time" },
+        "checkIn": { "type": "string", "format": "date-time" },
+        "checkOut": { "type": "string", "format": "date-time" },
+        "total": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "cancelled"] },
         "source": { "type": "string" },
-        "raw_group": { "type": "string" },
-        "booking_date": { "type": "string", "format": "date" },
-        "cancellation_date": { "type": "string", "format": "date" },
-        "checkin_datetime": { "type": "string", "format": "date-time" },
-        "checkout_datetime": { "type": "string", "format": "date-time" },
-        "category": { "type": "string" },
-        "room": { "type": "string" },
-        "total_amount": { "type": "number" },
-        "sellerId": { "type": "string" },
-        "companyId": { "type": "string" },
-        "uploadId": { "type": "string" },
-        "monthKey": { "type": "string", "description": "YYYY-MM based on check-in" }
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["booking_code", "total_amount", "companyId", "checkin_datetime"]
+      "required": ["code", "sellerUid", "bookingDate", "total", "status"]
     },
     "Plan": {
       "title": "Plan",
-      "description": "Sales target for a month",
+      "description": "Sales target",
       "type": "object",
       "properties": {
-        "id": { "type": "string" },
-        "month": { "type": "string", "description": "YYYY-MM" },
-        "target_amount": { "type": "number" },
-        "companyId": { "type": "string" },
-        "userId": { "type": "string", "description": "Optional for personal plans" }
+        "type": { "type": "string", "enum": ["company", "personal"] },
+        "uid": { "type": "string", "description": "null for company plans" },
+        "period": { "type": "string", "enum": ["week", "month", "year"] },
+        "target": { "type": "number" },
+        "actual": { "type": "number" },
+        "startDate": { "type": "string", "format": "date-time" },
+        "endDate": { "type": "string", "format": "date-time" }
       },
-      "required": ["month", "target_amount", "companyId"]
+      "required": ["type", "period", "target", "startDate", "endDate"]
     },
     "Penalty": {
       "title": "Penalty",
-      "description": "Penalty event for a seller",
+      "description": "Penalty event",
       "type": "object",
       "properties": {
-        "id": { "type": "string" },
-        "userId": { "type": "string" },
-        "companyId": { "type": "string" },
-        "date": { "type": "string", "format": "date" },
-        "amount": { "type": "number" },
-        "reason": { "type": "string" }
+        "uid": { "type": "string" },
+        "percent": { "type": "number" },
+        "reason": { "type": "string" },
+        "weekStart": { "type": "string", "format": "date-time" },
+        "weekEnd": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" }
       },
-      "required": ["userId", "companyId", "amount", "date"]
+      "required": ["uid", "percent", "reason", "weekStart", "weekEnd"]
+    },
+    "Review": {
+      "title": "Review",
+      "description": "Weekly performance review",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "weekStart": { "type": "string", "format": "date-time" },
+        "weekEnd": { "type": "string", "format": "date-time" },
+        "mistakes": { "type": "array", "items": { "type": "string" } },
+        "comment": { "type": "string" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["uid", "weekStart", "weekEnd"]
+    },
+    "Commission": {
+      "title": "Commission",
+      "description": "Monthly commission calculation",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "month": { "type": "string", "description": "YYYY-MM" },
+        "gross": { "type": "number" },
+        "cancelled": { "type": "number" },
+        "net": { "type": "number" },
+        "baseRate": { "type": "number" },
+        "bonusRate": { "type": "number" },
+        "penaltyRate": { "type": "number" },
+        "finalRate": { "type": "number" },
+        "finalAmount": { "type": "number" }
+      },
+      "required": ["uid", "month", "net", "finalAmount"]
     }
   },
   "firestore": {
-    "/companies/{companyId}": {
-      "schema": "Company",
-      "description": "Company details"
-    },
     "/users/{userId}": {
-      "schema": "User",
+      "schema": "UserProfile",
       "description": "User profiles"
     },
-    "/bookings/{bookingId}": {
+    "/projects/{projectId}": {
+      "schema": "Project",
+      "description": "Projects"
+    },
+    "/projects/{projectId}/participants/{uid}": {
+      "schema": "Participant",
+      "description": "Project participants"
+    },
+    "/projects/{projectId}/bookings/{bookingId}": {
       "schema": "Booking",
-      "description": "Bookings records"
+      "description": "Bookings"
     },
-    "/plans/{planId}": {
+    "/projects/{projectId}/plans/{planId}": {
       "schema": "Plan",
-      "description": "Sales plans"
+      "description": "Plans"
     },
-    "/penalties/{penaltyId}": {
+    "/projects/{projectId}/penalties/{penaltyId}": {
       "schema": "Penalty",
-      "description": "Penalty events"
+      "description": "Penalties"
+    },
+    "/projects/{projectId}/reviews/{reviewId}": {
+      "schema": "Review",
+      "description": "Reviews"
+    },
+    "/projects/{projectId}/commissions/{commissionId}": {
+      "schema": "Commission",
+      "description": "Commissions"
     }
   }
 }

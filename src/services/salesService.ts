@@ -5,6 +5,7 @@ export interface BookingRow {
   'Код': string;
   'Источник': string;
   'Дата брони': string;
+  'Дата продажи'?: string;
   'Дата отмены': string;
   'Заезд': string;
   'Выезд': string;
@@ -42,20 +43,10 @@ export function calculateCommission(
   else baseRate = 0.06;
   
   const teamBonus = companyAchievementRate >= 100 ? 0.02 : 0;
-  const totalPenalties = penalties.reduce((sum, p) => sum + p.amount, 0);
+  const totalPenaltyRate = penalties.reduce((sum, p) => sum + p.percent, 0);
   
-  // Final rate logic: base + bonus - penalties (as percentage points or absolute?)
-  // Usually penalties are absolute amounts or rate deductions. 
-  // TZ says: "Применение штрафа к ставке комиссии. Защита от отрицательной ставки max(0, ...)"
-  // This implies penalties are rate deductions.
-  
-  const finalRate = Math.max(0, baseRate + teamBonus); // penalties are usually absolute in the final amount or rate?
-  // Let's assume penalties are absolute deductions from the final amount for now, 
-  // but TZ says "к ставке". So let's treat penalty as a rate deduction if it's small, 
-  // or just subtract from final amount. 
-  // "Защита от отрицательной ставки" -> implies rate.
-  
-  const finalAmount = Math.max(0, (net * finalRate) - totalPenalties);
+  const finalRate = Math.max(0, baseRate + teamBonus - totalPenaltyRate);
+  const finalAmount = Math.max(0, net * finalRate);
   
   return {
     id: '', // to be set by firestore
@@ -65,9 +56,10 @@ export function calculateCommission(
     gross,
     cancelled,
     net,
-    rate: baseRate,
-    bonus: teamBonus,
-    penalties: totalPenalties,
+    baseRate,
+    bonusRate: teamBonus,
+    penaltyRate: totalPenaltyRate,
+    finalRate,
     finalAmount,
     updatedAt: new Date().toISOString()
   };

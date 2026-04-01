@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from "react";
 import { FileUp, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { parseBookingExcel, BookingRow } from "../services/salesService";
-import { db } from "../firebase";
+import { db, handleFirestoreError, OperationType } from "../firebase";
 import { collection, addDoc, serverTimestamp, query, where, getDocs, updateDoc, doc } from "firebase/firestore";
 import { toast } from "sonner";
 import { useAuth } from "./FirebaseProvider";
@@ -30,7 +30,8 @@ export function ProjectUpload({ projectId, onSuccess }: ProjectUploadProps) {
       let rejectedCount = 0;
 
       // Create an upload record
-      const uploadRef = await addDoc(collection(db, "projects", projectId, "uploads"), {
+      const uploadPath = `projects/${projectId}/uploads`;
+      const uploadRef = await addDoc(collection(db, uploadPath), {
         projectId,
         uploaderUid: user.uid,
         fileName: file.name,
@@ -47,8 +48,9 @@ export function ProjectUpload({ projectId, onSuccess }: ProjectUploadProps) {
           }
 
           // Check for existing booking with same code in this project
+          const bookingPath = `projects/${projectId}/bookings`;
           const q = query(
-            collection(db, "projects", projectId, "bookings"),
+            collection(db, bookingPath),
             where("code", "==", String(row['Код']))
           );
           const existing = await getDocs(q);
@@ -59,6 +61,7 @@ export function ProjectUpload({ projectId, onSuccess }: ProjectUploadProps) {
             code: String(row['Код']),
             source: row['Источник'] || 'Unknown',
             bookingDate: row['Дата брони'] || null,
+            saleDate: row['Дата продажи'] || row['Дата брони'] || null,
             cancelDate: row['Дата отмены'] === '-' ? null : row['Дата отмены'],
             checkIn: row['Заезд'] || null,
             checkOut: row['Выезд'] || null,
@@ -70,10 +73,10 @@ export function ProjectUpload({ projectId, onSuccess }: ProjectUploadProps) {
           };
 
           if (!existing.empty) {
-            await updateDoc(doc(db, "projects", projectId, "bookings", existing.docs[0].id), bookingData);
+            await updateDoc(doc(db, bookingPath, existing.docs[0].id), bookingData);
             updatedCount++;
           } else {
-            await addDoc(collection(db, "projects", projectId, "bookings"), {
+            await addDoc(collection(db, bookingPath), {
               ...bookingData,
               createdAt: serverTimestamp()
             });
@@ -96,6 +99,7 @@ export function ProjectUpload({ projectId, onSuccess }: ProjectUploadProps) {
       if (onSuccess) onSuccess();
     } catch (error) {
       console.error("Upload error:", error);
+      handleFirestoreError(error, OperationType.WRITE, `projects/${projectId}/uploads`);
       toast.error("Ошибка при загрузке файла");
     } finally {
       setUploading(false);
