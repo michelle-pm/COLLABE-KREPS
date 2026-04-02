@@ -5,23 +5,35 @@ import { db, handleFirestoreError, OperationType } from "../firebase";
 import { collection, addDoc, serverTimestamp, query, where, getDocs, updateDoc, doc } from "firebase/firestore";
 import { toast } from "sonner";
 import { useAuth } from "./FirebaseProvider";
+import { toIsoOrNull, monthKey, processDate } from "../lib/date";
+
+import { logAction } from "../services/auditService";
 
 interface ProjectUploadProps {
   projectId: string;
+  actorRole: string;
   onSuccess?: () => void;
 }
 
-export function ProjectUpload({ projectId, onSuccess }: ProjectUploadProps) {
+export function ProjectUpload({ projectId, actorRole, onSuccess }: ProjectUploadProps) {
   const { user } = useAuth();
   const [uploading, setUploading] = useState(false);
   const [stats, setStats] = useState<{ new: number; updated: number; rejected: number } | null>(null);
 
-  const processFile = async (file: File) => {
+  const processFile = async (file: File, type: 'sellers_report' | 'full_bookings_report') => {
     if (!user) return;
     setUploading(true);
     setStats(null);
 
     try {
+      await logAction({
+        action: 'import_start',
+        actor_uid: user.uid,
+        actor_role: actorRole,
+        project_id: projectId,
+        after_json: { fileName: file.name, type }
+      });
+
       const buffer = await file.arrayBuffer();
       const rows = parseBookingExcel(buffer);
       
@@ -35,14 +47,16 @@ export function ProjectUpload({ projectId, onSuccess }: ProjectUploadProps) {
         projectId,
         uploaderUid: user.uid,
         fileName: file.name,
+        sourceFileType: type,
         status: 'processing',
         createdAt: serverTimestamp()
       });
 
       for (const row of rows) {
         try {
-          // Basic validation
-          if (!row['Код'] || !row['Итого']) {
+          // Basic validation: Code is mandatory for deduplication
+          const code = String(row['Код'] || '').trim();
+          if (!code || !row['Итого']) {
             rejectedCount++;
             continue;
           }
@@ -51,20 +65,51 @@ export function ProjectUpload({ projectId, onSuccess }: ProjectUploadProps) {
           const bookingPath = `projects/${projectId}/bookings`;
           const q = query(
             collection(db, bookingPath),
-            where("code", "==", String(row['Код']))
+            where("code", "==", code)
           );
           const existing = await getDocs(q);
 
-          const bookingData = {
+          const bookingDate = processDate(row['Дата брони']);
+          const saleDate = processDate(row['Дата продажи']);
+          const checkIn = processDate(row['Заезд']);
+          const checkOut = processDate(row['Выезд']);
+
+          // Determine sellerUid
+          let sellerUid: string | null = null;
+          if (type === 'sellers_report') {
+            sellerUid = user.uid;
+          } else {
+            sellerUid = null; 
+          }
+
+          const bookingData: any = {
             projectId,
-            sellerUid: user.uid, // In a real app, map row['Seller'] to UID
-            code: String(row['Код']),
+            sellerUid,
+            code,
             source: row['Источник'] || 'Unknown',
-            bookingDate: row['Дата брони'] || null,
-            saleDate: row['Дата продажи'] || row['Дата брони'] || null,
-            cancelDate: row['Дата отмены'] === '-' ? null : row['Дата отмены'],
-            checkIn: row['Заезд'] || null,
-            checkOut: row['Выезд'] || null,
+            sourceFileType: type,
+            sourceFileName: file.name,
+            
+            // Raw data for safety
+            bookingDateRaw: bookingDate.raw,
+            saleDateRaw: saleDate.raw,
+            checkInRaw: checkIn.raw,
+            checkOutRaw: checkOut.raw,
+
+            // Normalized ISO strings
+            bookingDateIso: bookingDate.iso,
+            saleDateIso: saleDate.iso,
+            checkInIso: checkIn.iso,
+            checkOutIso: checkOut.iso,
+
+            // Month keys for filtering
+            bookingMonthKey: bookingDate.monthKey,
+            saleMonthKey: saleDate.monthKey || bookingDate.monthKey,
+            checkInMonthKey: checkIn.monthKey,
+
+            // Error flags
+            dateParseError: bookingDate.error || checkIn.error,
+
             category: row['Категория'] || 'Unknown',
             roomNumber: String(row['Номер'] || ''),
             total: Number(row['Итого']),
@@ -73,7 +118,21 @@ export function ProjectUpload({ projectId, onSuccess }: ProjectUploadProps) {
           };
 
           if (!existing.empty) {
-            await updateDoc(doc(db, bookingPath, existing.docs[0].id), bookingData);
+            const existingDoc = existing.docs[0];
+            const existingData = existingDoc.data();
+
+            // Deduplication logic: 
+            // If we are uploading a sellers_report and the existing record 
+            // was from a full_bookings_report, we might want to "claim" it 
+            // by setting the sellerUid.
+            if (type === 'sellers_report' && !existingData.sellerUid) {
+              bookingData.sellerUid = user.uid;
+            } else if (type === 'full_bookings_report' && existingData.sellerUid) {
+              // If it already has a seller, don't overwrite it with null from full report
+              bookingData.sellerUid = existingData.sellerUid;
+            }
+
+            await updateDoc(doc(db, bookingPath, existingDoc.id), bookingData);
             updatedCount++;
           } else {
             await addDoc(collection(db, bookingPath), {
@@ -95,7 +154,20 @@ export function ProjectUpload({ projectId, onSuccess }: ProjectUploadProps) {
       });
 
       setStats({ new: newCount, updated: updatedCount, rejected: rejectedCount });
-      toast.success("Отчет успешно обработан");
+      
+      await logAction({
+        action: 'import_success',
+        actor_uid: user.uid,
+        actor_role: actorRole,
+        project_id: projectId,
+        after_json: { 
+          fileName: file.name, 
+          type, 
+          stats: { new: newCount, updated: updatedCount, rejected: rejectedCount } 
+        }
+      });
+
+      toast.success(`Отчет (${type === 'sellers_report' ? 'Продажи' : 'Общий'}) успешно обработан`);
       if (onSuccess) onSuccess();
     } catch (error) {
       console.error("Upload error:", error);
@@ -106,58 +178,77 @@ export function ProjectUpload({ projectId, onSuccess }: ProjectUploadProps) {
     }
   };
 
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    const file = e.dataTransfer.files[0];
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>, type: 'sellers_report' | 'full_bookings_report') => {
+    const file = e.target.files?.[0];
     if (file && (file.name.endsWith('.xlsx') || file.name.endsWith('.xls'))) {
-      processFile(file);
-    } else {
+      processFile(file, type);
+    } else if (file) {
       toast.error("Пожалуйста, выберите файл Excel (.xlsx)");
     }
-  }, []);
+  };
 
   return (
     <div className="space-y-6">
-      <div 
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={onDrop}
-        className={`border-2 border-dashed rounded-3xl p-12 text-center space-y-4 transition-all ${
-          uploading ? 'border-indigo-500/50 bg-indigo-500/5' : 'border-white/10 hover:border-white/20 hover:bg-white/5'
-        }`}
-      >
-        {uploading ? (
-          <div className="space-y-4">
-            <Loader2 className="w-12 h-12 text-indigo-500 animate-spin mx-auto" />
-            <div>
-              <p className="text-white font-bold">Обработка отчета...</p>
-              <p className="text-slate-500 text-sm">Это может занять несколько секунд</p>
-            </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Sellers Report Upload */}
+        <div className={`border-2 border-dashed rounded-3xl p-8 text-center space-y-4 transition-all ${
+          uploading ? 'border-indigo-500/50 bg-indigo-500/5 opacity-50 pointer-events-none' : 'border-white/10 hover:border-indigo-500/30 hover:bg-white/5'
+        }`}>
+          <div className="w-12 h-12 bg-indigo-500/10 rounded-xl flex items-center justify-center mx-auto">
+            <FileUp className="w-6 h-6 text-indigo-400" />
           </div>
-        ) : (
-          <>
-            <div className="w-16 h-16 bg-white/5 rounded-2xl flex items-center justify-center mx-auto">
-              <FileUp className="w-8 h-8 text-slate-500" />
-            </div>
-            <div>
-              <p className="text-white font-bold">Перетащите XLSX отчет сюда</p>
-              <p className="text-slate-500 text-sm">Или нажмите, чтобы выбрать файл</p>
-            </div>
-            <input 
-              type="file" 
-              accept=".xlsx,.xls"
-              onChange={(e) => e.target.files?.[0] && processFile(e.target.files[0])}
-              className="hidden" 
-              id="file-upload"
-            />
-            <label 
-              htmlFor="file-upload"
-              className="inline-block bg-indigo-500 hover:bg-indigo-600 text-white px-8 py-3 rounded-xl font-bold text-sm cursor-pointer transition-all active:scale-95 shadow-lg shadow-indigo-500/20"
-            >
-              Выбрать файл
-            </label>
-          </>
-        )}
+          <div>
+            <p className="text-white font-bold text-sm">Отчет продажника</p>
+            <p className="text-slate-500 text-xs">Ваши личные продажи</p>
+          </div>
+          <input 
+            type="file" 
+            accept=".xlsx,.xls"
+            onChange={(e) => handleFileSelect(e, 'sellers_report')}
+            className="hidden" 
+            id="sellers-upload"
+          />
+          <label 
+            htmlFor="sellers-upload"
+            className="inline-block bg-indigo-500 hover:bg-indigo-600 text-white px-6 py-2 rounded-xl font-bold text-xs cursor-pointer transition-all active:scale-95 shadow-lg shadow-indigo-500/20"
+          >
+            Загрузить продажи
+          </label>
+        </div>
+
+        {/* Full Bookings Report Upload */}
+        <div className={`border-2 border-dashed rounded-3xl p-8 text-center space-y-4 transition-all ${
+          uploading ? 'border-indigo-500/50 bg-indigo-500/5 opacity-50 pointer-events-none' : 'border-white/10 hover:border-emerald-500/30 hover:bg-white/5'
+        }`}>
+          <div className="w-12 h-12 bg-emerald-500/10 rounded-xl flex items-center justify-center mx-auto">
+            <FileUp className="w-6 h-6 text-emerald-400" />
+          </div>
+          <div>
+            <p className="text-white font-bold text-sm">Общий отчет</p>
+            <p className="text-slate-500 text-xs">Все бронирования отеля</p>
+          </div>
+          <input 
+            type="file" 
+            accept=".xlsx,.xls"
+            onChange={(e) => handleFileSelect(e, 'full_bookings_report')}
+            className="hidden" 
+            id="full-upload"
+          />
+          <label 
+            htmlFor="full-upload"
+            className="inline-block bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-2 rounded-xl font-bold text-xs cursor-pointer transition-all active:scale-95 shadow-lg shadow-emerald-500/20"
+          >
+            Загрузить общий
+          </label>
+        </div>
       </div>
+
+      {uploading && (
+        <div className="flex items-center justify-center gap-3 p-4 bg-white/5 rounded-2xl border border-white/10 animate-pulse">
+          <Loader2 className="w-5 h-5 text-indigo-500 animate-spin" />
+          <span className="text-sm text-slate-400 font-medium">Обработка данных...</span>
+        </div>
+      )}
 
       {stats && (
         <div className="grid grid-cols-3 gap-4 animate-in fade-in slide-in-from-top-4">

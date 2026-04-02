@@ -12,6 +12,8 @@ import { Friends } from "./pages/Friends";
 import { Messages } from "./pages/Messages";
 import { Projects } from "./pages/Projects";
 import { ProjectDetails } from "./pages/ProjectDetails";
+import { Tasks } from "./pages/Tasks";
+import { GlobalTasks } from "./pages/GlobalTasks";
 import { Admin } from "./pages/Admin";
 import { Settings } from "./pages/Settings";
 import { Auth } from "./pages/Auth";
@@ -43,6 +45,8 @@ export default function App() {
             <Route path="messages" element={<Messages />} />
             <Route path="projects" element={<Projects />} />
             <Route path="projects/:id" element={<ProjectDetails />} />
+            <Route path="projects/:id/tasks" element={<Tasks />} />
+            <Route path="tasks" element={<GlobalTasks />} />
             <Route path="admin" element={<Admin />} />
             <Route path="settings" element={<Settings />} />
           </Route>

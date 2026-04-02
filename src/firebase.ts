@@ -1,11 +1,14 @@
 import { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { getFirestore, doc, getDocFromServer } from "firebase/firestore";
+import { initializeFirestore, doc, getDocFromServer } from "firebase/firestore";
 import firebaseConfig from "../firebase-applet-config.json";
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const db = initializeFirestore(app, {
+  experimentalAutoDetectLongPolling: true,
+  useFetchStreams: false
+} as any, firebaseConfig.firestoreDatabaseId);
 
 async function testConnection() {
   try {
@@ -72,22 +75,18 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 import { onSnapshot as firebaseOnSnapshot, Query, DocumentReference, DocumentSnapshot, QuerySnapshot, FirestoreError } from "firebase/firestore";
 
 export function safeSnapshot<T>(
-  ref: Query<T> | DocumentReference<T>,
-  onNext: (snapshot: QuerySnapshot<T> | DocumentSnapshot<T>) => void,
-  onError?: (error: FirestoreError) => void,
+  ref: any,
+  onNext: (snapshot: any) => void,
+  onError?: (error: any) => void,
   operationType: OperationType = OperationType.GET,
   path: string | null = null
 ) {
   return firebaseOnSnapshot(
-    ref as any,
-    (snapshot: any) => {
-      onNext(snapshot);
-    },
-    (error: FirestoreError) => {
-      handleFirestoreError(error, operationType, path);
-      if (onError) {
-        onError(error);
-      }
+    ref,
+    (snapshot) => onNext(snapshot),
+    (error) => {
+      handleFirestoreError(error, operationType, path); // только лог
+      if (onError) onError(error);
     }
   );
 }

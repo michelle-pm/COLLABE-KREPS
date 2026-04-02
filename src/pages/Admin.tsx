@@ -7,16 +7,41 @@ import {
   doc, 
   setDoc, 
   serverTimestamp,
-  arrayUnion
+  arrayUnion,
+  query,
+  orderBy,
+  limit
 } from "firebase/firestore";
 import { useAuth } from "../components/FirebaseProvider";
-import { Shield, RefreshCw, CheckCircle2, AlertCircle } from "lucide-react";
+import { Shield, RefreshCw, CheckCircle2, AlertCircle, History, User, Briefcase, Clock } from "lucide-react";
 import { toast } from "sonner";
+import { AuditLog } from "../types";
+import { cn } from "../lib/utils";
 
 export function Admin() {
   const { profile } = useAuth();
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<{ success: number; failed: number } | null>(null);
+  const [logs, setLogs] = useState<AuditLog[]>([]);
+  const [loadingLogs, setLoadingLogs] = useState(false);
+
+  React.useEffect(() => {
+    if (profile?.role === 'admin') {
+      fetchLogs();
+    }
+  }, [profile]);
+
+  const fetchLogs = async () => {
+    setLoadingLogs(true);
+    try {
+      const logsSnap = await getDocs(query(collection(db, "audit_logs"), orderBy("created_at", "desc"), limit(50)));
+      setLogs(logsSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) } as AuditLog)));
+    } catch (error) {
+      console.error("Error fetching logs:", error);
+    } finally {
+      setLoadingLogs(false);
+    }
+  };
 
   if (profile?.role !== 'admin') {
     return (
@@ -122,6 +147,66 @@ export function Admin() {
             </div>
           </div>
         )}
+      </div>
+
+      <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2.5rem] p-8 space-y-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-2xl font-bold text-white mb-2">Журнал аудита</h2>
+            <p className="text-slate-400">Последние 50 критических действий в системе.</p>
+          </div>
+          <button 
+            onClick={fetchLogs}
+            disabled={loadingLogs}
+            className="p-3 bg-white/5 hover:bg-white/10 rounded-xl transition-all"
+          >
+            <RefreshCw className={cn("w-5 h-5 text-indigo-400", loadingLogs && "animate-spin")} />
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          {loadingLogs ? (
+            [1, 2, 3].map(i => <div key={i} className="h-20 bg-white/5 rounded-2xl animate-pulse" />)
+          ) : logs.length > 0 ? (
+            logs.map((log) => (
+              <div key={log.id} className="bg-white/5 border border-white/10 rounded-2xl p-4 flex items-center justify-between group hover:border-indigo-500/30 transition-all">
+                <div className="flex items-center gap-4">
+                  <div className="w-10 h-10 bg-indigo-500/10 rounded-xl flex items-center justify-center">
+                    <History className="w-5 h-5 text-indigo-400" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-bold text-white uppercase tracking-wider">{log.action.replace(/_/g, ' ')}</span>
+                      <span className="text-[10px] bg-indigo-500/10 text-indigo-400 px-2 py-0.5 rounded-lg font-black uppercase tracking-widest border border-indigo-500/20">
+                        {log.actor_role}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 text-[10px] text-slate-500 font-medium">
+                      <div className="flex items-center gap-1">
+                        <User className="w-3 h-3" />
+                        {log.actor_uid}
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Briefcase className="w-3 h-3" />
+                        {log.project_id}
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        {log.created_at?.toDate().toLocaleString('ru-RU')}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-[10px] font-black text-slate-600 uppercase tracking-widest mb-1">Entity</div>
+                  <div className="text-xs text-slate-400 font-mono">{log.entity || '-'}:{log.entity_id || '-'}</div>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="text-center py-12 text-slate-500 italic">Логов пока нет.</div>
+          )}
+        </div>
       </div>
     </div>
   );

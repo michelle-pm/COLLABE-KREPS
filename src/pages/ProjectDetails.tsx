@@ -16,10 +16,12 @@ import {
   getDocs,
   arrayUnion,
   arrayRemove,
-  setDoc
+  setDoc,
+  limit
 } from "firebase/firestore";
 import { useAuth } from "../components/FirebaseProvider";
 import { Project, ProjectComment, UserProfile, Booking, Plan, ProjectParticipant } from "../types";
+import { calculateCommissions } from "../services/commissionService";
 import { 
   ArrowLeft, 
   Clock, 
@@ -42,18 +44,32 @@ import {
   X,
   Shield,
   UserMinus,
-  AlertTriangle
+  AlertTriangle,
+  CheckSquare,
+  History, 
+  Lock, 
+  Unlock, 
+  Camera, 
+  RotateCcw, 
+  ListFilter
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "../lib/utils";
 import { ProjectUpload } from "../components/ProjectUpload";
+import { clearMonthData, clearAllProjectData } from "../services/cleanupService";
+import { getMonthConfig, lockMonth, unlockMonth } from "../services/monthService";
+import { createSnapshot, getSnapshots, rollbackToSnapshot } from "../services/snapshotService";
+import { logAction } from "../services/auditService";
+import { MonthConfig, CalculationSnapshot, Commission, AuditLog } from "../types";
+
+import { MonthlyCycleWizard } from "../components/MonthlyCycleWizard";
 
 interface ParticipantItemProps {
   uid: string;
   isOwner: boolean;
   role?: string;
   onRemove?: () => void | Promise<void>;
-  onChangeRole?: (role: 'manager' | 'seller') => void | Promise<void>;
+  onChangeRole?: (role: 'manager' | 'seller' | 'tech') => void | Promise<void>;
   canManage: boolean;
 }
 
@@ -71,7 +87,8 @@ const ParticipantItem: React.FC<ParticipantItemProps> = ({ uid, isOwner, role, o
   const roleLabels = {
     owner: 'Владелец',
     manager: 'Менеджер',
-    seller: 'Продавец'
+    seller: 'Продавец',
+    tech: 'Тех. отдел'
   };
 
   const displayRole = isOwner ? 'owner' : (role || 'seller');
@@ -129,6 +146,18 @@ const ParticipantItem: React.FC<ParticipantItemProps> = ({ uid, isOwner, role, o
                     Сделать продавцом
                   </button>
                 )}
+                {role !== 'tech' && onChangeRole && (
+                  <button 
+                    onClick={() => {
+                      onChangeRole('tech');
+                      setShowMenu(false);
+                    }}
+                    className="w-full text-left px-4 py-2 text-xs font-bold text-slate-300 hover:text-white hover:bg-white/5 transition-colors flex items-center gap-2"
+                  >
+                    <CheckSquare className="w-3 h-3" />
+                    Тех. отдел
+                  </button>
+                )}
                 {onRemove && (
                   <button 
                     onClick={() => {
@@ -159,7 +188,7 @@ const WarningBanner = ({ message }: { message: string }) => (
 
 export function ProjectDetails() {
   const { id } = useParams<{ id: string }>();
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const navigate = useNavigate();
   const [project, setProject] = useState<Project | null>(null);
   const [projectParticipants, setProjectParticipants] = useState<ProjectParticipant[]>([]);
@@ -171,13 +200,30 @@ export function ProjectDetails() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [subErrors, setSubErrors] = useState<Record<string, boolean>>({});
-  const [activeTab, setActiveTab] = useState<'overview' | 'bookings' | 'plans' | 'commissions' | 'chat'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'bookings' | 'plans' | 'commissions' | 'chat' | 'snapshots' | 'audit' | 'tasks'>('overview');
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
+  const [monthMode, setMonthMode] = useState<'sale' | 'checkin'>('sale');
+  const [efficiencyPeriod, setEfficiencyPeriod] = useState<'week' | 'month' | 'year'>('month');
+
+  // Month Locking & Snapshots
+  const [monthConfig, setMonthConfig] = useState<MonthConfig | null>(null);
+  const [snapshots, setSnapshots] = useState<CalculationSnapshot[]>([]);
+  const [showSnapshotModal, setShowSnapshotModal] = useState(false);
+  const [snapshotNote, setSnapshotNote] = useState("");
+  const [isSnapshotting, setIsSnapshotting] = useState(false);
+  const [showUnlockModal, setShowUnlockModal] = useState(false);
+  const [unlockReason, setUnlockReason] = useState("");
+  const [isLocking, setIsLocking] = useState(false);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
 
   // Modals state
   const [showPlanModal, setShowPlanModal] = useState(false);
   const [showUserSearch, setShowUserSearch] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showCleanupModal, setShowCleanupModal] = useState<'month' | 'all' | null>(null);
+  const [showWizard, setShowWizard] = useState(false);
+  const [cleanupConfirmText, setCleanupConfirmText] = useState("");
+  const [isCleaning, setIsCleaning] = useState(false);
   
   // Plan creation state
   const [planTarget, setPlanTarget] = useState("");
@@ -189,19 +235,193 @@ export function ProjectDetails() {
   const isParticipant = isOwner || project?.participant_uids?.includes(user?.uid || "");
   const canManage = isOwner || userParticipant?.role === 'manager';
 
-  const filteredByMonthBookings = bookings.filter(b => {
-    const date = b.saleDate || b.bookingDate;
-    return date && date.startsWith(selectedMonth);
+  const filteredByMonthBookings = bookings.filter((b: any) => {
+    const key = monthMode === 'sale'
+      ? (b.saleMonthKey || b.bookingMonthKey)
+      : b.checkInMonthKey;
+    return key === selectedMonth;
   });
+
+  const prettyDate = (iso?: string | null) => {
+    if (!iso) return "Дата не указана";
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? "Дата не указана" : d.toLocaleDateString("ru-RU");
+  };
+
+  const roleByUid = new Map(projectParticipants.map(p => [p.uid, p.role]));
+
+  const getParticipantRole = (uid?: string | null) => {
+    if (!uid) return "Участник";
+    if (project?.owner_uid === uid) return "Владелец";
+    const r = roleByUid.get(uid);
+    if (r === "manager") return "Менеджер";
+    if (r === "seller") return "Продавец";
+    return "Участник";
+  };
+
+  const handleCleanup = async () => {
+    if (cleanupConfirmText !== "ОЧИСТИТЬ") {
+      toast.error("Введите слово ОЧИСТИТЬ для подтверждения");
+      return;
+    }
+
+    setIsCleaning(true);
+    try {
+      const role = getParticipantRole(user!.uid);
+      if (showCleanupModal === 'month') {
+        await clearMonthData(id!, selectedMonth, user!.uid, role);
+        toast.success(`Данные за ${selectedMonth} успешно очищены`);
+      } else if (showCleanupModal === 'all') {
+        await clearAllProjectData(id!, user!.uid, role);
+        toast.success("Все данные проекта успешно очищены");
+      }
+      setShowCleanupModal(null);
+      setCleanupConfirmText("");
+    } catch (error) {
+      console.error("Cleanup error:", error);
+      toast.error("Ошибка при очистке данных");
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
+  const handleLock = async () => {
+    if (!id || !user) return;
+    setIsLocking(true);
+    try {
+      const role = getParticipantRole(user.uid);
+      await lockMonth(id, selectedMonth, user.uid, role);
+      toast.success("Месяц успешно заблокирован");
+    } catch (err) {
+      console.error("Lock error:", err);
+      toast.error("Ошибка при блокировке месяца");
+    } finally {
+      setIsLocking(false);
+    }
+  };
+
+  const handleUnlock = async () => {
+    if (!id || !user || !unlockReason) return;
+    setIsLocking(true);
+    try {
+      const role = getParticipantRole(user.uid);
+      await unlockMonth(id, selectedMonth, user.uid, role, unlockReason);
+      toast.success("Месяц разблокирован");
+      setShowUnlockModal(false);
+      setUnlockReason("");
+    } catch (err) {
+      console.error("Unlock error:", err);
+      toast.error("Ошибка при разблокировке месяца");
+    } finally {
+      setIsLocking(false);
+    }
+  };
+
+  const handleCreateSnapshot = async () => {
+    if (!id || !user) return;
+    setIsSnapshotting(true);
+    try {
+      const role = getParticipantRole(user.uid);
+      const personalPlans = plans.filter(p => p.type === 'personal' && p.period === 'month');
+      const companyPlan = plans.find(p => p.type === 'company' && p.period === 'month') || null;
+      
+      const results = calculateCommissions(
+        filteredByMonthBookings,
+        personalPlans,
+        companyPlan,
+        projectParticipants,
+        stats.net
+      );
+
+      const commissions: Commission[] = results.map(r => ({
+        id: `${r.uid}_${selectedMonth}`,
+        projectId: id,
+        uid: r.uid,
+        month: selectedMonth,
+        gross: filteredByMonthBookings.filter(b => b.sellerUid === r.uid).reduce((sum, b) => sum + b.total, 0),
+        cancelled: filteredByMonthBookings.filter(b => b.sellerUid === r.uid && b.status === 'cancelled').reduce((sum, b) => sum + b.total, 0),
+        net: r.netSales,
+        baseRate: r.baseRate,
+        bonusRate: r.bonusRate,
+        penaltyRate: r.penaltyRate,
+        finalRate: r.finalRate,
+        finalAmount: r.amount,
+        updatedAt: new Date().toISOString()
+      }));
+
+      await createSnapshot(id, selectedMonth, user.uid, role, snapshotNote, commissions, stats);
+      toast.success("Снапшот создан");
+      setShowSnapshotModal(false);
+      setSnapshotNote("");
+    } catch (err) {
+      console.error("Snapshot error:", err);
+      toast.error("Ошибка при создании снапшота");
+    } finally {
+      setIsSnapshotting(false);
+    }
+  };
+
+  const handleRollback = async (snapshot: CalculationSnapshot) => {
+    if (!id || !user) return;
+    if (!window.confirm(`Вы уверены, что хотите откатиться к версии ${snapshot.version}? Текущие расчеты будут перезаписаны.`)) return;
+    
+    try {
+      const role = getParticipantRole(user.uid);
+      await rollbackToSnapshot(id, snapshot, user.uid, role);
+      toast.success(`Откат к версии ${snapshot.version} выполнен`);
+    } catch (err) {
+      console.error("Rollback error:", err);
+      toast.error("Ошибка при откате");
+    }
+  };
 
   const stats = {
     gross: filteredByMonthBookings.reduce((sum, b) => sum + b.total, 0),
     cancelled: filteredByMonthBookings.filter(b => b.status === 'cancelled').reduce((sum, b) => sum + b.total, 0),
     net: 0,
     cancelRate: 0,
+    sellerRevenue: 0,
+    nonSellerRevenue: 0,
+    nonSellerBySource: {} as Record<string, number>,
   };
+
+  filteredByMonthBookings.forEach(b => {
+    const isCancelled = b.status === 'cancelled';
+    const amount = isCancelled ? 0 : b.total;
+    if (b.sellerUid) {
+      stats.sellerRevenue += amount;
+    } else {
+      stats.nonSellerRevenue += amount;
+      const source = b.source || 'Unknown';
+      stats.nonSellerBySource[source] = (stats.nonSellerBySource[source] || 0) + amount;
+    }
+  });
+
   stats.net = stats.gross - stats.cancelled;
   stats.cancelRate = filteredByMonthBookings.length > 0 ? (filteredByMonthBookings.filter(b => b.status === 'cancelled').length / filteredByMonthBookings.length) * 100 : 0;
+
+  // Efficiency filtering
+  const efficiencyBookings = bookings.filter((b: any) => {
+    const dateStr = monthMode === 'sale' 
+      ? (b.saleDateIso || b.bookingDateIso) 
+      : b.checkInIso;
+    if (!dateStr) return false;
+    
+    const date = new Date(dateStr);
+    const now = new Date();
+    
+    if (efficiencyPeriod === 'year') {
+      return date.getFullYear() === now.getFullYear();
+    } else if (efficiencyPeriod === 'month') {
+      return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth();
+    } else if (efficiencyPeriod === 'week') {
+      const startOfWeek = new Date(now);
+      startOfWeek.setDate(now.getDate() - now.getDay());
+      startOfWeek.setHours(0, 0, 0, 0);
+      return date >= startOfWeek && date <= now;
+    }
+    return false;
+  });
 
   useEffect(() => {
     console.log("ProjectDetails mounted with id:", id);
@@ -337,6 +557,45 @@ export function ProjectDetails() {
       `projects/${id}/participants`
     );
 
+    // Subscribe to month config
+    const unsubscribeMonthConfig = safeSnapshot(
+      doc(db, "projects", id, "month_configs", selectedMonth),
+      (docSnap: any) => {
+        if (!isMounted) return;
+        if (docSnap.exists()) {
+          setMonthConfig({ id: docSnap.id, ...docSnap.data() } as MonthConfig);
+        } else {
+          setMonthConfig(null);
+        }
+      },
+      (err) => {
+        if (!isMounted) return;
+        console.error("Month config error:", err);
+      },
+      OperationType.GET,
+      `projects/${id}/month_configs/${selectedMonth}`
+    );
+
+    // Subscribe to snapshots
+    const snapshotsQuery = query(
+      collection(db, "projects", id, "snapshots"),
+      where("monthKey", "==", selectedMonth),
+      orderBy("version", "desc")
+    );
+    const unsubscribeSnapshots = safeSnapshot(
+      snapshotsQuery,
+      (snapshot: any) => {
+        if (!isMounted) return;
+        setSnapshots(snapshot.docs.map((d: any) => ({ id: d.id, ...d.data() } as CalculationSnapshot)));
+      },
+      (err) => {
+        if (!isMounted) return;
+        console.error("Snapshots error:", err);
+      },
+      OperationType.GET,
+      `projects/${id}/snapshots`
+    );
+
     return () => {
       isMounted = false;
       unsubscribeProject();
@@ -344,8 +603,64 @@ export function ProjectDetails() {
       unsubscribePlans();
       unsubscribeComments();
       unsubscribeParticipants();
+      unsubscribeMonthConfig();
+      unsubscribeSnapshots();
     };
-  }, [id, user, navigate]);
+  }, [id, user, navigate, selectedMonth]);
+
+  useEffect(() => {
+    if (activeTab !== 'audit' || !id) return;
+    
+    const q = query(
+      collection(db, "audit_logs"),
+      where("project_id", "==", id),
+      orderBy("created_at", "desc"),
+      limit(50)
+    );
+
+    const unsubscribe = safeSnapshot(
+      q,
+      (snapshot: any) => {
+        setAuditLogs(snapshot.docs.map((d: any) => ({ id: d.id, ...d.data() } as AuditLog)));
+      },
+      (err) => console.error("Audit logs error:", err),
+      OperationType.GET,
+      `audit_logs`
+    );
+
+    return () => unsubscribe();
+  }, [activeTab, id]);
+
+  // Fallback logic for participants when sub-collection is inaccessible
+  useEffect(() => {
+    if (subErrors.participants && project) {
+      const fallbackParticipants: ProjectParticipant[] = [];
+      
+      // Add owner
+      fallbackParticipants.push({
+        id: project.owner_uid,
+        uid: project.owner_uid,
+        role: 'owner',
+        active: true,
+        commissionBaseRate: 0.03
+      } as ProjectParticipant);
+      
+      // Add other participants from participant_uids
+      project.participant_uids?.forEach(uid => {
+        if (uid !== project.owner_uid) {
+          fallbackParticipants.push({
+            id: uid,
+            uid: uid,
+            role: 'seller',
+            active: true,
+            commissionBaseRate: 0.03
+          } as ProjectParticipant);
+        }
+      });
+      
+      setProjectParticipants(fallbackParticipants);
+    }
+  }, [subErrors.participants, project]);
 
   const handleAddComment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -438,6 +753,17 @@ export function ProjectDetails() {
         participant_uids: arrayRemove(participantUid)
       });
       await deleteDoc(doc(db, "projects", id, "participants", participantUid));
+      
+      await logAction({
+        action: 'remove_participant',
+        actor_uid: user?.uid || '',
+        actor_role: getParticipantRole(user?.uid),
+        project_id: id,
+        entity: 'participant',
+        entity_id: participantUid,
+        before_json: { uid: participantUid }
+      });
+
       toast.success("Участник удален");
     } catch (error) {
       console.error("Remove participant error:", error);
@@ -445,13 +771,26 @@ export function ProjectDetails() {
     }
   };
 
-  const handleChangeRole = async (participantUid: string, newRole: 'manager' | 'seller') => {
+  const handleChangeRole = async (participantUid: string, newRole: 'manager' | 'seller' | 'tech') => {
     if (!id || !canManage || participantUid === project?.owner_uid) return;
     try {
+      const before = projectParticipants.find(p => p.uid === participantUid);
       await updateDoc(doc(db, "projects", id, "participants", participantUid), {
         role: newRole,
         updatedAt: serverTimestamp()
       });
+
+      await logAction({
+        action: 'change_role',
+        actor_uid: user?.uid || '',
+        actor_role: getParticipantRole(user?.uid),
+        project_id: id,
+        entity: 'participant',
+        entity_id: participantUid,
+        before_json: before,
+        after_json: { role: newRole }
+      });
+
       toast.success("Роль изменена");
     } catch (error) {
       console.error("Change role error:", error);
@@ -477,6 +816,17 @@ export function ProjectDetails() {
         commissionBaseRate: 0.03,
         joinedAt: serverTimestamp()
       });
+
+      await logAction({
+        action: 'add_participant',
+        actor_uid: user?.uid || '',
+        actor_role: getParticipantRole(user?.uid),
+        project_id: id,
+        entity: 'participant',
+        entity_id: userProfile.uid,
+        after_json: { uid: userProfile.uid, role: 'seller' }
+      });
+
       setShowUserSearch(false);
       toast.success("Участник добавлен");
     } catch (error) {
@@ -528,13 +878,11 @@ export function ProjectDetails() {
   return (
     <div className="max-w-5xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
       {/* Warning Banners */}
-      {Object.values(subErrors).some(v => v) && (
-        <WarningBanner message="Некоторые данные проекта временно недоступны. Проверьте соединение или права доступа." />
+      {subErrors.participants && (
+        <WarningBanner message="Роли участников недоступны, показан базовый список." />
       )}
-
-      {/* Warning Banner for sub-errors */}
-      {Object.values(subErrors).some(v => v) && (
-        <WarningBanner message="Некоторые данные (участники, планы или чат) временно недоступны из-за ограничений доступа. Мы используем сохраненные данные проекта." />
+      {Object.values(subErrors).some((v, i) => v && Object.keys(subErrors)[i] !== 'participants') && (
+        <WarningBanner message="Некоторые данные проекта временно недоступны. Проверьте соединение или права доступа." />
       )}
 
       {/* Header */}
@@ -596,38 +944,74 @@ export function ProjectDetails() {
       </div>
 
       {/* Tabs & Month Selector */}
-      <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-        <div className="flex items-center gap-2 p-1 bg-white/5 border border-white/10 rounded-2xl w-fit">
+      <div className="flex flex-col xl:flex-row items-center justify-between gap-4">
+        <div className="flex items-center gap-1 p-1 bg-white/5 border border-white/10 rounded-2xl w-fit overflow-x-auto max-w-full no-scrollbar">
           {[
             { id: 'overview', label: 'Обзор', icon: LayoutGrid },
-            { id: 'bookings', label: 'Бронирования', icon: FileUp },
-            { id: 'plans', label: 'Планы', icon: Target },
-            { id: 'commissions', label: 'Комиссии', icon: Wallet },
+            { id: 'tasks', label: 'Задачи', icon: CheckSquare },
+            { id: 'bookings', label: 'Бронирования', icon: FileUp, restricted: profile?.role === 'tech' },
+            { id: 'plans', label: 'Планы', icon: Target, restricted: profile?.role === 'tech' },
+            { id: 'commissions', label: 'Комиссии', icon: Wallet, restricted: profile?.role === 'tech' },
+            { id: 'snapshots', label: 'Версии', icon: History, restricted: profile?.role === 'tech' },
+            { id: 'audit', label: 'Аудит', icon: Shield, restricted: profile?.role === 'tech' },
             { id: 'chat', label: 'Обсуждение', icon: MessageSquare },
-          ].map((tab) => (
+          ].filter(tab => !tab.restricted).map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id as any)}
               className={cn(
-                "flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-bold transition-all",
+                "flex items-center gap-2 px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all whitespace-nowrap",
                 activeTab === tab.id 
                   ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/20" 
-                  : "text-slate-400 hover:text-white hover:bg-white/5"
+                  : "text-slate-500 hover:text-slate-300 hover:bg-white/5"
               )}
             >
-              <tab.icon className="w-4 h-4" />
+              <tab.icon className="w-3.5 h-3.5" />
               {tab.label}
             </button>
           ))}
         </div>
 
-        <div className="flex items-center gap-3 bg-white/5 border border-white/10 p-1 rounded-2xl">
+        <div className="flex items-center gap-3 bg-white/5 border border-white/10 p-1.5 rounded-2xl">
+          <div className="flex bg-black/20 rounded-xl p-1">
+            <button 
+              onClick={() => setMonthMode('sale')}
+              className={cn(
+                "px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all",
+                monthMode === 'sale' ? "bg-white/10 text-white" : "text-slate-500 hover:text-slate-300"
+              )}
+            >
+              Продажа
+            </button>
+            <button 
+              onClick={() => setMonthMode('checkin')}
+              className={cn(
+                "px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all",
+                monthMode === 'checkin' ? "bg-white/10 text-white" : "text-slate-500 hover:text-slate-300"
+              )}
+            >
+              Заезд
+            </button>
+          </div>
+          <div className="w-px h-4 bg-white/10" />
           <input 
             type="month" 
             value={selectedMonth}
             onChange={(e) => setSelectedMonth(e.target.value)}
-            className="bg-transparent text-white text-sm font-bold px-4 py-2 focus:outline-none [color-scheme:dark]"
+            className="bg-transparent text-white text-sm font-bold px-2 py-1 focus:outline-none [color-scheme:dark]"
           />
+          <div className="w-px h-4 bg-white/10" />
+          {monthConfig?.status === 'locked' ? (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-[10px] font-black uppercase tracking-widest">
+              <Lock className="w-3 h-3" />
+              Locked
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400 text-[10px] font-black uppercase tracking-widest">
+              <Unlock className="w-3 h-3" />
+              Open
+            </div>
+          )}
         </div>
       </div>
 
@@ -636,6 +1020,36 @@ export function ProjectDetails() {
         <div className="lg:col-span-2 space-y-6">
           {activeTab === 'overview' && (
             <div className="space-y-6">
+              {filteredByMonthBookings.some((b: any) => !b.saleMonthKey && !b.bookingMonthKey) && (
+                <div className="bg-amber-500/10 border border-amber-500/20 p-4 rounded-2xl flex items-center gap-3 animate-in fade-in slide-in-from-top-2">
+                  <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0" />
+                  <p className="text-xs text-amber-200 font-medium">
+                    Обнаружены старые данные. Для корректной фильтрации по месяцам рекомендуется повторно загрузить Excel файл.
+                  </p>
+                </div>
+              )}
+
+              {/* Monthly Cycle Wizard Card */}
+              <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-[2rem] p-8 flex items-center justify-between group hover:bg-indigo-500/15 transition-all mb-6">
+                <div className="flex items-center gap-6">
+                  <div className="w-16 h-16 bg-indigo-500 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-500/20 group-hover:scale-110 transition-transform">
+                    <History className="w-8 h-8 text-white" />
+                  </div>
+                  <div>
+                    <h3 className="text-2xl font-black text-white tracking-tight uppercase italic">Месячный цикл</h3>
+                    <p className="text-indigo-200/60 text-sm max-w-md">
+                      Запустите мастер настройки для проверки участников, планов и загрузки данных за выбранный период.
+                    </p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowWizard(true)}
+                  className="bg-white text-indigo-950 px-8 py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-indigo-50 transition-all active:scale-95 shadow-xl"
+                >
+                  Запустить мастер
+                </button>
+              </div>
+
               {/* Weekly Review Summary */}
               <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2rem] p-8">
                 <div className="flex items-center justify-between mb-6">
@@ -676,35 +1090,85 @@ export function ProjectDetails() {
               </div>
 
               {/* Stats Cards */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2rem] p-8">
-                  <div className="text-slate-500 text-xs font-black uppercase tracking-widest mb-2">Net Продажи ({selectedMonth})</div>
+                  <div className="text-slate-500 text-xs font-black uppercase tracking-widest mb-2">Общая выручка ({selectedMonth})</div>
                   <div className="text-4xl font-black text-white tracking-tighter">
                     {stats.net.toLocaleString('ru-RU')} ₽
                   </div>
-                  <div className="mt-4 flex items-center gap-2 text-emerald-400 text-xs font-bold">
-                    <TrendingUp className="w-4 h-4" />
-                    Всего {filteredByMonthBookings.length} бронирований
+                  <div className="mt-4 flex flex-col gap-1">
+                    <div className="flex items-center gap-2 text-indigo-400 text-xs font-bold">
+                      <TrendingUp className="w-4 h-4" />
+                      Всего {filteredByMonthBookings.length} бронирований
+                    </div>
+                    <div className="text-slate-500 text-[10px] font-bold">
+                      Сумма отмен: {stats.cancelled.toLocaleString('ru-RU')} ₽ ({stats.cancelRate.toFixed(1)}%)
+                    </div>
                   </div>
                 </div>
                 <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2rem] p-8">
-                  <div className="text-slate-500 text-xs font-black uppercase tracking-widest mb-2">Отмены</div>
-                  <div className="text-4xl font-black text-white tracking-tighter">
-                    {stats.cancelRate.toFixed(1)}%
+                  <div className="text-slate-500 text-xs font-black uppercase tracking-widest mb-2">Через продавцов</div>
+                  <div className="text-4xl font-black text-emerald-400 tracking-tighter">
+                    {stats.sellerRevenue.toLocaleString('ru-RU')} ₽
                   </div>
                   <div className="mt-4 flex items-center gap-2 text-slate-500 text-xs font-bold">
-                    Сумма отмен: {stats.cancelled.toLocaleString('ru-RU')} ₽
+                    {((stats.sellerRevenue / (stats.net || 1)) * 100).toFixed(1)}% от общей
+                  </div>
+                </div>
+                <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2rem] p-8">
+                  <div className="text-slate-500 text-xs font-black uppercase tracking-widest mb-2">Без продавцов</div>
+                  <div className="text-4xl font-black text-blue-400 tracking-tighter">
+                    {stats.nonSellerRevenue.toLocaleString('ru-RU')} ₽
+                  </div>
+                  <div className="mt-4 flex items-center gap-2 text-slate-500 text-xs font-bold">
+                    {((stats.nonSellerRevenue / (stats.net || 1)) * 100).toFixed(1)}% от общей
                   </div>
                 </div>
               </div>
 
+              {/* Non-Seller Breakdown */}
+              {stats.nonSellerRevenue > 0 && (
+                <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2rem] p-8">
+                  <div className="flex items-center justify-between mb-6">
+                    <div className="flex items-center gap-3">
+                      <Wallet className="w-5 h-5 text-blue-400" />
+                      <h3 className="text-xl font-bold text-white">Без продавцов (по источникам)</h3>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                    {Object.entries(stats.nonSellerBySource).map(([source, amount]) => (
+                      <div key={source} className="p-4 bg-white/5 rounded-2xl border border-white/5">
+                        <div className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-1 truncate">{source}</div>
+                        <div className="text-lg font-bold text-white">{amount.toLocaleString('ru-RU')} ₽</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Top Sources / Sellers */}
               <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2rem] p-8">
-                <h3 className="text-xl font-bold text-white mb-6">Эффективность за {selectedMonth}</h3>
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-xl font-bold text-white">Эффективность</h3>
+                  <div className="flex bg-black/20 rounded-xl p-1">
+                    {(['week', 'month', 'year'] as const).map((p) => (
+                      <button
+                        key={p}
+                        onClick={() => setEfficiencyPeriod(p)}
+                        className={cn(
+                          "px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all",
+                          efficiencyPeriod === p ? "bg-white/10 text-white" : "text-slate-500 hover:text-slate-300"
+                        )}
+                      >
+                        {p === 'week' ? 'Неделя' : p === 'month' ? 'Месяц' : 'Год'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <div className="space-y-4">
-                  {filteredByMonthBookings.length > 0 ? (
+                  {efficiencyBookings.length > 0 ? (
                     <div className="space-y-4">
-                      {filteredByMonthBookings.slice(0, 5).map(booking => (
+                      {efficiencyBookings.slice(0, 5).map(booking => (
                         <div key={booking.id} className="flex items-center justify-between p-4 bg-white/5 rounded-2xl border border-white/5">
                           <div className="flex items-center gap-3">
                             <div className="w-10 h-10 rounded-xl bg-slate-800 flex items-center justify-center text-indigo-400 font-bold border border-white/5">
@@ -717,9 +1181,7 @@ export function ProjectDetails() {
                           </div>
                           <div className="text-right">
                             <div className="text-sm font-bold text-white">{booking.total.toLocaleString('ru-RU')} ₽</div>
-                            <div className={`text-[10px] uppercase font-black ${booking.status === 'cancelled' ? 'text-red-500' : 'text-emerald-500'}`}>
-                              {booking.status === 'cancelled' ? 'Отмена' : 'Активно'}
-                            </div>
+                            <div className="text-[10px] text-slate-500">{prettyDate(booking.saleDateIso || (booking as any).saleDate)}</div>
                           </div>
                         </div>
                       ))}
@@ -734,6 +1196,28 @@ export function ProjectDetails() {
             </div>
           )}
 
+          {activeTab === 'tasks' && (
+            <div className="space-y-6">
+              <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2rem] p-12 text-center space-y-6">
+                <div className="w-20 h-20 bg-indigo-500/10 rounded-full flex items-center justify-center mx-auto">
+                  <CheckSquare className="w-10 h-10 text-indigo-400" />
+                </div>
+                <div className="space-y-2">
+                  <h2 className="text-3xl font-black text-white tracking-tight uppercase italic">Управление задачами</h2>
+                  <p className="text-slate-400 max-w-md mx-auto">
+                    Используйте Канбан-доску для отслеживания прогресса, назначения ответственных и контроля сроков.
+                  </p>
+                </div>
+                <button 
+                  onClick={() => navigate(`/projects/${id}/tasks`)}
+                  className="bg-indigo-500 hover:bg-indigo-600 text-white px-10 py-4 rounded-2xl font-black uppercase tracking-widest text-sm transition-all shadow-lg shadow-indigo-500/20 active:scale-95"
+                >
+                  Открыть Канбан-доску
+                </button>
+              </div>
+            </div>
+          )}
+
           {activeTab === 'bookings' && (
             <div className="space-y-6">
               <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2rem] p-8">
@@ -742,8 +1226,30 @@ export function ProjectDetails() {
                     <FileUp className="w-6 h-6 text-indigo-500" />
                     <h2 className="text-2xl font-bold text-white tracking-tight">Импорт Excel</h2>
                   </div>
+                  {monthConfig?.status === 'locked' && (
+                    <div className="flex items-center gap-2 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-xs font-bold">
+                      <Lock className="w-4 h-4" />
+                      Месяц заблокирован
+                    </div>
+                  )}
                 </div>
-                <ProjectUpload projectId={id!} />
+                
+                {monthConfig?.status === 'locked' && (
+                  <div className="bg-red-500/10 border border-red-500/20 p-4 rounded-2xl flex items-center gap-3 mb-6">
+                    <Lock className="w-5 h-5 text-red-400 shrink-0" />
+                    <p className="text-sm text-red-200 font-medium">
+                      Загрузка новых данных невозможна, так как месяц заблокирован.
+                    </p>
+                  </div>
+                )}
+
+                <div className={cn(monthConfig?.status === 'locked' && "opacity-50 pointer-events-none")}>
+                  <ProjectUpload 
+                    projectId={id!} 
+                    actorRole={getParticipantRole(user?.uid)}
+                    onSuccess={() => {}} 
+                  />
+                </div>
               </div>
 
               {bookings.length > 0 && (
@@ -761,7 +1267,7 @@ export function ProjectDetails() {
                         </div>
                         <div className="text-right">
                           <div className="text-sm font-bold text-white">{booking.total.toLocaleString('ru-RU')} ₽</div>
-                          <div className="text-[10px] text-slate-500">{new Date(booking.checkIn).toLocaleDateString('ru-RU')}</div>
+                          <div className="text-[10px] text-slate-500">{prettyDate(booking.checkInIso || (booking as any).checkIn)}</div>
                         </div>
                       </div>
                     ))}
@@ -836,7 +1342,7 @@ export function ProjectDetails() {
                           <div key={plan.id} className="p-4 bg-white/5 rounded-2xl border border-white/5 space-y-3">
                             <div className="flex items-center justify-between">
                               <div className="text-sm font-bold text-white">
-                                {projectParticipants.find((p: any) => p.uid === plan.uid)?.role || 'Участник'}
+                                {getParticipantRole(plan.uid)}
                               </div>
                               <div className="text-xs font-bold text-indigo-400">
                                 {userNet.toLocaleString('ru-RU')} / {plan.target.toLocaleString('ru-RU')} ₽
@@ -946,35 +1452,23 @@ export function ProjectDetails() {
               <div className="flex items-center justify-between">
                 <h2 className="text-2xl font-bold text-white tracking-tight">Расчет комиссий</h2>
                 <div className="px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-xs font-bold text-slate-400">
-                  Автоматический расчет
+                  Автоматический расчет V2
                 </div>
               </div>
 
               <div className="grid grid-cols-1 gap-6">
                 {personalPlans.length > 0 ? (
-                  personalPlans.map(plan => {
-                    // Simple on-the-fly calculation for demo
-                    const userBookings = filteredByMonthBookings.filter(b => b.sellerUid === plan.uid);
-                    const gross = userBookings.reduce((sum, b) => sum + b.total, 0);
-                    const cancelled = userBookings.filter(b => b.status === 'cancelled').reduce((sum, b) => sum + b.total, 0);
-                    const net = gross - cancelled;
-                    const achievement = plan.target > 0 ? (net / plan.target) * 100 : 0;
+                  calculateCommissions(
+                    filteredByMonthBookings,
+                    personalPlans,
+                    companyPlan,
+                    projectParticipants,
+                    stats.net
+                  ).map(res => {
+                    const participant = projectParticipants.find(p => p.uid === res.uid);
                     
-                    // Get base rate from participant data if available
-                    const participant = projectParticipants.find((p: any) => p.uid === plan.uid);
-                    let rate = participant?.commissionBaseRate || 0.03;
-                    
-                    // Progressive rate logic (example from TZ context)
-                    if (achievement >= 80) rate = 0.06;
-                    else if (achievement >= 50) rate = 0.05;
-
-                    const companyAchievement = companyPlan && companyPlan.target > 0 ? (stats.net / companyPlan.target) * 100 : 0;
-                    const bonus = companyAchievement >= 100 ? 0.02 : 0;
-                    const totalRate = rate + bonus;
-                    const amount = net * totalRate;
-
                     return (
-                      <div key={plan.id} className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2rem] p-8">
+                      <div key={res.uid} className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2rem] p-8">
                         <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
                           <div className="flex items-center gap-4">
                             <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 flex items-center justify-center text-indigo-400 font-bold border border-indigo-500/20">
@@ -985,27 +1479,31 @@ export function ProjectDetails() {
                                 {participant?.role || 'Участник'}
                               </div>
                               <div className="text-xs text-slate-500 font-bold uppercase tracking-widest">
-                                Выполнение: {achievement.toFixed(1)}%
+                                Выполнение: {res.achievement.toFixed(1)}%
                               </div>
                             </div>
                           </div>
 
-                          <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
+                          <div className="grid grid-cols-2 md:grid-cols-5 gap-8">
                             <div>
                               <div className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-1">Net Продажи</div>
-                              <div className="text-lg font-bold text-white">{net.toLocaleString('ru-RU')} ₽</div>
+                              <div className="text-lg font-bold text-white">{res.netSales.toLocaleString('ru-RU')} ₽</div>
                             </div>
                             <div>
                               <div className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-1">Ставка</div>
-                              <div className="text-lg font-bold text-emerald-400">{(rate * 100).toFixed(1)}%</div>
+                              <div className="text-lg font-bold text-emerald-400">{(res.baseRate * 100).toFixed(1)}%</div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-1">Штраф</div>
+                              <div className="text-lg font-bold text-red-400">{(res.penaltyRate * 100).toFixed(0)}%</div>
                             </div>
                             <div>
                               <div className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-1">Бонус</div>
-                              <div className="text-lg font-bold text-blue-400">{(bonus * 100).toFixed(0)}%</div>
+                              <div className="text-lg font-bold text-blue-400">{(res.bonusRate * 100).toFixed(0)}%</div>
                             </div>
                             <div className="text-right">
                               <div className="text-[10px] text-slate-500 font-black uppercase tracking-widest mb-1">К выплате</div>
-                              <div className="text-xl font-black text-white">{amount.toLocaleString('ru-RU')} ₽</div>
+                              <div className="text-xl font-black text-white">{res.amount.toLocaleString('ru-RU')} ₽</div>
                             </div>
                           </div>
                         </div>
@@ -1018,6 +1516,128 @@ export function ProjectDetails() {
                     <p className="text-slate-500 italic">Установите планы, чтобы увидеть расчет комиссий</p>
                   </div>
                 )}
+
+                {canManage && personalPlans.length > 0 && (
+                  <div className="flex justify-end gap-4 mt-8">
+                    <button 
+                      onClick={() => setShowSnapshotModal(true)}
+                      className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-6 py-3 rounded-2xl font-bold text-sm border border-white/10 transition-all"
+                    >
+                      <Camera className="w-4 h-4" />
+                      Создать снапшот
+                    </button>
+                    {monthConfig?.status === 'locked' ? (
+                      <button 
+                        onClick={() => setShowUnlockModal(true)}
+                        className="flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 px-6 py-3 rounded-2xl font-bold text-sm border border-red-500/20 transition-all"
+                      >
+                        <Unlock className="w-4 h-4" />
+                        Разблокировать месяц
+                      </button>
+                    ) : (
+                      <button 
+                        onClick={handleLock}
+                        disabled={isLocking}
+                        className="flex items-center gap-2 bg-emerald-500 hover:bg-indigo-600 text-white px-6 py-3 rounded-2xl font-bold text-sm shadow-lg shadow-indigo-500/20 transition-all disabled:opacity-50"
+                      >
+                        <Lock className="w-4 h-4" />
+                        {isLocking ? 'Блокировка...' : 'Утвердить выплаты и заблокировать'}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'snapshots' && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-2xl font-bold text-white tracking-tight">Версии расчетов</h2>
+                <button 
+                  onClick={() => setShowSnapshotModal(true)}
+                  className="flex items-center gap-2 bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-500/20"
+                >
+                  <Camera className="w-4 h-4" />
+                  Новая версия
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                {snapshots.length > 0 ? (
+                  snapshots.map(snap => (
+                    <div key={snap.id} className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2rem] p-8">
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="flex items-center gap-4">
+                          <div className="w-12 h-12 rounded-2xl bg-white/5 flex items-center justify-center text-white font-bold border border-white/10">
+                            v{snap.version}
+                          </div>
+                          <div>
+                            <div className="text-lg font-bold text-white">
+                              {snap.note || `Версия ${snap.version}`}
+                            </div>
+                            <div className="text-xs text-slate-500 font-bold uppercase tracking-widest">
+                              {prettyDate(snap.createdAt?.toDate?.()?.toISOString() || snap.createdAt)} • {snap.authorUid}
+                            </div>
+                          </div>
+                        </div>
+                        <button 
+                          onClick={() => handleRollback(snap)}
+                          className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-xl text-xs font-bold border border-white/10 transition-all"
+                        >
+                          <RotateCcw className="w-4 h-4" />
+                          Откатиться
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2rem] p-12 text-center">
+                    <History className="w-12 h-12 text-slate-700 mx-auto mb-4" />
+                    <p className="text-slate-500 italic">Снапшотов пока нет</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'audit' && (
+            <div className="space-y-6">
+              <h2 className="text-2xl font-bold text-white tracking-tight">Журнал аудита</h2>
+              <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-[2rem] overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="border-b border-white/10">
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest">Действие</th>
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest">Исполнитель</th>
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest">Дата</th>
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest">Детали</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {auditLogs.map(log => (
+                        <tr key={log.id} className="hover:bg-white/5 transition-colors">
+                          <td className="px-6 py-4">
+                            <span className="px-2 py-1 bg-indigo-500/10 text-indigo-400 text-[10px] font-black uppercase tracking-widest rounded-lg">
+                              {log.action}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="text-sm font-bold text-white truncate max-w-[100px]">{log.actor_uid}</div>
+                            <div className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">{log.actor_role}</div>
+                          </td>
+                          <td className="px-6 py-4 text-sm text-slate-400">
+                            {prettyDate(log.created_at?.toDate?.()?.toISOString() || log.created_at)}
+                          </td>
+                          <td className="px-6 py-4 text-xs text-slate-500 font-mono truncate max-w-xs">
+                            {log.after_json || log.before_json || '-'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}
@@ -1093,6 +1713,10 @@ export function ProjectDetails() {
             <p className="mt-4 text-sm font-medium opacity-80">
               {stats.net >= (companyPlan?.target || 0) 
                 ? "Общий план на месяц выполнен! Команда получит бонус +2%." 
+                : stats.net >= (companyPlan?.target || 0) * 0.8
+                ? "Почти у цели! Еще немного усилий и бонус ваш!"
+                : stats.net >= (companyPlan?.target || 0) * 0.5
+                ? "Половина пути пройдена. Темп хороший!"
                 : `До выполнения плана осталось ${(Math.max(0, (companyPlan?.target || 0) - stats.net)).toLocaleString('ru-RU')} ₽.`}
             </p>
           </div>
@@ -1159,41 +1783,170 @@ export function ProjectDetails() {
       {/* Settings Modal */}
       {showSettingsModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-          <div className="bg-slate-900 border border-white/10 rounded-[2.5rem] p-8 w-full max-w-md shadow-2xl animate-in zoom-in-95 duration-200">
-            <h3 className="text-2xl font-bold text-white mb-6 tracking-tight">Настройки проекта</h3>
-            <form onSubmit={handleUpdateSettings} className="space-y-4">
-              <div>
-                <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 ml-1">Название</label>
-                <input 
-                  name="title"
-                  defaultValue={project?.title}
-                  className="w-full bg-white/5 border border-white/10 rounded-2xl py-3 px-4 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all"
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 ml-1">Описание</label>
-                <textarea 
-                  name="description"
-                  defaultValue={project?.description}
-                  className="w-full bg-white/5 border border-white/10 rounded-2xl py-3 px-4 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all h-24 resize-none"
-                />
-              </div>
-              <div className="flex gap-3 pt-4">
+          <div className="bg-slate-900 border border-white/10 rounded-[2.5rem] p-8 w-full max-w-2xl shadow-2xl animate-in zoom-in-95 duration-200 max-h-[90vh] overflow-y-auto custom-scrollbar">
+            <div className="flex items-center justify-between mb-8">
+              <h3 className="text-3xl font-black text-white tracking-tight uppercase italic">Настройки проекта</h3>
+              <button onClick={() => setShowSettingsModal(false)} className="text-slate-500 hover:text-white transition-colors">
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
+              <form onSubmit={handleUpdateSettings} className="space-y-6">
+                <div className="space-y-4">
+                  <h4 className="text-xs font-black text-indigo-400 uppercase tracking-[0.2em]">Основное</h4>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 ml-1">Название</label>
+                    <input 
+                      name="title"
+                      defaultValue={project?.title}
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl py-3 px-4 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 ml-1">Описание</label>
+                    <textarea 
+                      name="description"
+                      defaultValue={project?.description}
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl py-3 px-4 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all h-32 resize-none"
+                    />
+                  </div>
+                </div>
                 <button 
-                  type="button"
-                  onClick={() => setShowSettingsModal(false)}
-                  className="flex-1 py-3 bg-white/5 hover:bg-white/10 text-slate-400 rounded-2xl font-bold text-sm transition-all"
+                  type="submit"
+                  className="w-full py-4 bg-indigo-500 hover:bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest transition-all shadow-lg shadow-indigo-500/20 active:scale-95"
+                >
+                  Сохранить изменения
+                </button>
+              </form>
+
+              <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-black text-indigo-400 uppercase tracking-[0.2em]">Участники</h4>
+                  <button 
+                    onClick={() => setShowUserSearch(true)}
+                    className="text-[10px] font-black text-white/50 hover:text-white uppercase tracking-widest flex items-center gap-2 transition-colors"
+                  >
+                    <UserPlus className="w-3 h-3" />
+                    Добавить
+                  </button>
+                </div>
+                
+                <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+                  {project?.participant_uids?.map((uid) => {
+                    const participantData = projectParticipants.find(p => p.uid === uid);
+                    return (
+                      <ParticipantItem 
+                        key={uid} 
+                        uid={uid} 
+                        isOwner={uid === project.owner_uid} 
+                        role={participantData?.role}
+                        canManage={canManage}
+                        onRemove={() => handleRemoveParticipant(uid)}
+                        onChangeRole={(newRole) => handleChangeRole(uid, newRole)}
+                      />
+                    );
+                  })}
+                </div>
+
+                {isOwner && (
+                  <div className="pt-6 border-t border-white/5 space-y-4">
+                    <h4 className="text-xs font-black text-red-400 uppercase tracking-[0.2em]">Опасная зона</h4>
+                    <div className="grid grid-cols-1 gap-3">
+                      <button 
+                        onClick={() => setShowCleanupModal('month')}
+                        className="w-full py-3 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 rounded-2xl font-bold text-sm transition-all"
+                      >
+                        Очистить данные за {selectedMonth}
+                      </button>
+                      <button 
+                        onClick={() => setShowCleanupModal('all')}
+                        className="w-full py-3 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 rounded-2xl font-bold text-sm transition-all"
+                      >
+                        Очистить ВСЕ данные проекта
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Snapshot Modal */}
+      {showSnapshotModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-white/10 rounded-[2.5rem] p-8 w-full max-w-md shadow-2xl animate-in zoom-in-95 duration-200">
+            <h3 className="text-2xl font-bold text-white mb-6 tracking-tight">Создать снапшот</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 ml-1">Заметка</label>
+                <textarea 
+                  value={snapshotNote}
+                  onChange={(e) => setSnapshotNote(e.target.value)}
+                  placeholder="Например: Финальный расчет перед выплатой"
+                  className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all min-h-[100px]"
+                />
+              </div>
+
+              <div className="flex gap-3 mt-8">
+                <button 
+                  onClick={() => setShowSnapshotModal(false)}
+                  className="flex-1 bg-white/5 hover:bg-white/10 text-white py-4 rounded-2xl font-bold text-sm transition-all"
                 >
                   Отмена
                 </button>
                 <button 
-                  type="submit"
-                  className="flex-1 py-3 bg-indigo-500 hover:bg-indigo-600 text-white rounded-2xl font-bold text-sm transition-all shadow-lg shadow-indigo-500/20"
+                  onClick={handleCreateSnapshot}
+                  disabled={isSnapshotting}
+                  className="flex-1 bg-indigo-500 hover:bg-indigo-600 text-white py-4 rounded-2xl font-bold text-sm transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50"
                 >
-                  Сохранить
+                  {isSnapshotting ? 'Создание...' : 'Создать'}
                 </button>
               </div>
-            </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Unlock Modal */}
+      {showUnlockModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-white/10 rounded-[2.5rem] p-8 w-full max-w-md shadow-2xl animate-in zoom-in-95 duration-200">
+            <h3 className="text-2xl font-bold text-white mb-6 tracking-tight">Разблокировать месяц</h3>
+            <div className="space-y-4">
+              <div className="bg-red-500/10 border border-red-500/20 p-4 rounded-2xl mb-4">
+                <p className="text-xs text-red-400 font-medium">
+                  Разблокировка месяца позволяет изменять данные. Это действие будет записано в журнал аудита.
+                </p>
+              </div>
+              <div>
+                <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 ml-1">Причина разблокировки</label>
+                <textarea 
+                  value={unlockReason}
+                  onChange={(e) => setUnlockReason(e.target.value)}
+                  placeholder="Укажите причину..."
+                  className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition-all min-h-[100px]"
+                />
+              </div>
+
+              <div className="flex gap-3 mt-8">
+                <button 
+                  onClick={() => setShowUnlockModal(false)}
+                  className="flex-1 bg-white/5 hover:bg-white/10 text-white py-4 rounded-2xl font-bold text-sm transition-all"
+                >
+                  Отмена
+                </button>
+                <button 
+                  onClick={handleUnlock}
+                  disabled={isLocking || !unlockReason}
+                  className="flex-1 bg-red-500 hover:bg-red-600 text-white py-4 rounded-2xl font-bold text-sm transition-all shadow-lg shadow-red-500/20 disabled:opacity-50"
+                >
+                  {isLocking ? 'Разблокировка...' : 'Разблокировать'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -1204,6 +1957,72 @@ export function ProjectDetails() {
           onClose={() => setShowUserSearch(false)} 
           onSelect={handleAddParticipant} 
         />
+      )}
+
+      {/* Monthly Cycle Wizard */}
+      {project && (
+        <MonthlyCycleWizard 
+          projectId={id!}
+          isOpen={showWizard}
+          onClose={() => setShowWizard(false)}
+          project={project}
+          participants={projectParticipants}
+          actorRole={getParticipantRole(user?.uid)}
+        />
+      )}
+
+      {/* Cleanup Confirmation Modal */}
+      {showCleanupModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div className="bg-slate-900 border border-red-500/20 rounded-[2.5rem] p-8 w-full max-w-md shadow-2xl animate-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-4 mb-6 text-red-500">
+              <div className="w-12 h-12 rounded-2xl bg-red-500/10 flex items-center justify-center">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <h3 className="text-2xl font-bold tracking-tight">Внимание!</h3>
+            </div>
+            
+            <p className="text-slate-300 mb-6 leading-relaxed">
+              {showCleanupModal === 'month' 
+                ? `Вы собираетесь удалить все бронирования и расчеты за ${selectedMonth}. Это действие необратимо.`
+                : "Вы собираетесь удалить ВСЕ данные проекта (бронирования, планы, комиссии, штрафы). Это действие необратимо."}
+            </p>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 ml-1">
+                  Введите "ОЧИСТИТЬ" для подтверждения
+                </label>
+                <input 
+                  value={cleanupConfirmText}
+                  onChange={(e) => setCleanupConfirmText(e.target.value)}
+                  placeholder="ОЧИСТИТЬ"
+                  className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white placeholder:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-500/50 transition-all uppercase"
+                />
+              </div>
+
+              <div className="flex gap-3 pt-4">
+                <button 
+                  onClick={() => {
+                    setShowCleanupModal(null);
+                    setCleanupConfirmText("");
+                  }}
+                  disabled={isCleaning}
+                  className="flex-1 bg-white/5 hover:bg-white/10 text-white py-4 rounded-2xl font-bold text-sm transition-all disabled:opacity-50"
+                >
+                  Отмена
+                </button>
+                <button 
+                  onClick={handleCleanup}
+                  disabled={isCleaning || cleanupConfirmText !== "ОЧИСТИТЬ"}
+                  className="flex-1 bg-red-500 hover:bg-red-600 text-white py-4 rounded-2xl font-bold text-sm transition-all shadow-lg shadow-red-500/20 disabled:opacity-50 disabled:grayscale"
+                >
+                  {isCleaning ? "Удаление..." : "Удалить"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

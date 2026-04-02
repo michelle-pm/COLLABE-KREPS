@@ -51,10 +51,12 @@ export interface Project {
   updatedAt: any;
 }
 
+export type UserRole = 'owner' | 'manager' | 'seller' | 'tech' | 'admin';
+
 export interface ProjectParticipant {
   id: string; // uid
   uid: string;
-  role: 'owner' | 'manager' | 'seller';
+  role: UserRole;
   commissionBaseRate: number;
   active: boolean;
 }
@@ -81,6 +83,64 @@ export interface Booking {
   status: 'active' | 'cancelled';
   createdAt: any;
   updatedAt: any;
+
+  // Normalized fields (Stage 2)
+  bookingDateRaw?: any;
+  saleDateRaw?: any;
+  checkInRaw?: any;
+  checkOutRaw?: any;
+  bookingDateIso?: string | null;
+  saleDateIso?: string | null;
+  checkInIso?: string | null;
+  checkOutIso?: string | null;
+  bookingMonthKey?: string | null;
+  saleMonthKey?: string | null;
+  checkInMonthKey?: string | null;
+
+  // New fields (Stage 4)
+  sourceFileType?: 'sellers_report' | 'full_bookings_report';
+  sourceFileName?: string;
+  category?: string;
+  roomNumber?: string;
+  dateParseError?: boolean;
+}
+
+export interface AuditLog {
+  id: string;
+  action: string;
+  actor_uid: string;
+  actor_role: string;
+  project_id: string;
+  month_key?: string | null;
+  entity?: string;
+  entity_id?: string;
+  before_json?: string | null;
+  after_json?: string | null;
+  created_at: any;
+}
+
+export interface MonthConfig {
+  id: string; // monthKey
+  projectId: string;
+  status: 'open' | 'locked';
+  lockedAt?: any;
+  lockedBy?: string;
+  unlockReason?: string;
+  updatedAt: any;
+}
+
+export interface CalculationSnapshot {
+  id: string;
+  projectId: string;
+  monthKey: string;
+  version: number;
+  note: string;
+  authorUid: string;
+  createdAt: any;
+  data: {
+    commissions: Commission[];
+    stats: any;
+  };
 }
 
 export interface Plan {
@@ -147,5 +207,79 @@ export interface BookingUpload {
     updated: number;
     rejected: number;
   };
+  createdAt: any;
+}
+
+export interface TaskBoard {
+  id: string;
+  projectId: string;
+  name: string;
+  isDefault: boolean;
+  createdBy: string;
+  createdAt: any;
+  updatedAt: any;
+}
+
+export interface TaskColumn {
+  id: string;
+  projectId: string;
+  boardId: string;
+  title: string;
+  order: number;
+  wipLimit: number | null;
+  createdAt: any;
+  updatedAt: any;
+}
+
+export interface TaskChecklistItem {
+  id: string;
+  text: string;
+  done: boolean;
+}
+
+export interface TaskItem {
+  id: string;
+  projectId: string;
+  boardId: string;
+  columnId: string;
+  title: string;
+  description: string;
+  status: 'backlog' | 'todo' | 'in_progress' | 'review' | 'done' | 'blocked';
+  priority: 'low' | 'medium' | 'high' | 'critical';
+  assigneeUids: string[];
+  reporterUid: string;
+  watchers: string[];
+  tags: string[];
+  dueDate: any | null;
+  startDate: any | null;
+  estimateHours: number | null;
+  spentHours: number | null;
+  linkedBookingCode: string | null;
+  linkedMonth: string | null; // YYYY-MM
+  sourceType: 'general' | 'sales' | 'tech' | 'finance';
+  checklist: TaskChecklistItem[];
+  order: number;
+  archived: boolean;
+  createdAt: any;
+  updatedAt: any;
+}
+
+export interface TaskComment {
+  id: string;
+  projectId: string;
+  taskId: string;
+  authorUid: string;
+  text: string;
+  createdAt: any;
+  updatedAt: any;
+}
+
+export interface TaskActivity {
+  id: string;
+  projectId: string;
+  taskId: string;
+  actorUid: string;
+  actionType: string;
+  payload: any;
   createdAt: any;
 }
